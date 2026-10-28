@@ -13,7 +13,6 @@ use std::time::Duration;
 
 const HISTORY_COLS: usize = 900;
 const SCALE_W: f32 = 62.0;
-const LABEL_W: f32 = 240.0;
 const LINE_H: f32 = 15.0;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -305,7 +304,7 @@ impl eframe::App for App {
                             d.snr_db
                         ));
                     });
-                    ui.label(colored_text(tail_chars(&d.text, 160), 15.0));
+                    ui.label(colored_text(tail_chars(&d.text, 160), FontId::monospace(15.0), false));
                 }
                 None => {
                     ui.weak("Click a signal or spot to follow its decoded text. Scroll to zoom, drag to pan, double-click for full span.");
@@ -319,7 +318,9 @@ impl eframe::App for App {
                 ui.painter().text(full.center(), Align2::CENTER_CENTER, "Choose a source and press Start", FontId::proportional(18.0), Color32::GRAY);
                 return;
             }
-            let wf_rect = Rect::from_min_max(full.min, pos2(full.max.x - SCALE_W - LABEL_W, full.max.y));
+            // Spot rows get a generous share of the width so they can show running text.
+            let label_w = (full.width() * 0.36).clamp(240.0, 720.0);
+            let wf_rect = Rect::from_min_max(full.min, pos2(full.max.x - SCALE_W - label_w, full.max.y));
             let scale_rect = Rect::from_min_max(pos2(wf_rect.max.x, full.min.y), pos2(wf_rect.max.x + SCALE_W, full.max.y));
             let label_rect = Rect::from_min_max(pos2(scale_rect.max.x, full.min.y), full.max);
 
@@ -374,7 +375,7 @@ impl eframe::App for App {
 
             // Spot labels.
             painter.rect_filled(label_rect, 0.0, Color32::from_rgb(14, 18, 24));
-            let mut items: Vec<(&DecoderView, f32, String)> = decoders
+            let mut items: Vec<(&DecoderView, f32)> = decoders
                 .iter()
                 .filter_map(|d| {
                     let y = f_to_y(d.offset_hz);
@@ -385,14 +386,10 @@ impl eframe::App for App {
                     let c = if d.key_down { Color32::from_rgb(120, 255, 140) } else { Color32::from_rgb(230, 210, 60) };
                     painter.circle_filled(pos2(scale_rect.right() - 6.0, y), 3.0, c);
                     painter.line_segment([pos2(wf_rect.right() - 8.0, y), pos2(wf_rect.right(), y)], Stroke::new(2.0_f32, c));
-                    let text = if !d.label.is_empty() {
-                        d.label.clone()
-                    } else if !d.text.trim().is_empty() && d.idle_s < 60.0 {
-                        format!("…{}", tail_chars(d.text.trim(), 12))
-                    } else {
+                    if d.text.trim().is_empty() || d.idle_s > 120.0 {
                         return None;
-                    };
-                    Some((d, y, text))
+                    }
+                    Some((d, y))
                 })
                 .collect();
             let max_n = (label_rect.height() / LINE_H) as usize;
@@ -414,7 +411,9 @@ impl eframe::App for App {
             let label_resp = ui.interact(label_rect, ui.id().with("labels"), Sense::click());
             let pointer = label_resp.hover_pos();
             self.hovered = None;
-            for ((d, y, text), py) in items.iter().zip(&placed) {
+            let font = FontId::monospace(12.0);
+            let char_w = ui.fonts(|f| f.glyph_width(&font, 'M'));
+            for ((d, y), py) in items.iter().zip(&placed) {
                 let x0 = label_rect.left() + 14.0;
                 let row = Rect::from_min_max(pos2(x0 - 2.0, py - LINE_H / 2.0), pos2(label_rect.right() - 2.0, py + LINE_H / 2.0));
                 let is_sel = self.selected == Some(d.id);
@@ -431,23 +430,25 @@ impl eframe::App for App {
                 } else if is_hover {
                     painter.rect_filled(row, 2.0, Color32::from_gray(50));
                 }
-                let color = if d.idle_s > 30.0 {
-                    Color32::from_gray(120)
-                } else if d.cq {
-                    Color32::WHITE
-                } else {
-                    Color32::from_rgb(190, 210, 230)
-                };
-                let font = if d.cq { FontId::monospace(13.0) } else { FontId::monospace(12.0) };
-                let r = painter.text(pos2(x0, *py), Align2::LEFT_CENTER, text, font, color);
-                if d.cq && d.idle_s < 30.0 {
-                    let tri = r.right() + 6.0;
+                // CQ marker column, then as much of the running text as fits.
+                let active = d.idle_s < 30.0;
+                if d.cq && active {
                     painter.add(egui::Shape::convex_polygon(
-                        vec![pos2(tri, py - 5.0), pos2(tri + 8.0, *py), pos2(tri, py + 5.0)],
+                        vec![pos2(x0, py - 5.0), pos2(x0 + 8.0, *py), pos2(x0, py + 5.0)],
                         Color32::from_rgb(60, 200, 60),
                         Stroke::NONE,
                     ));
                 }
+                let text_x = x0 + 12.0;
+                let max_chars = ((row.right() - text_x - 4.0) / char_w).max(1.0) as usize;
+                let text = d.text.trim();
+                let shown = if text.chars().count() > max_chars {
+                    format!("…{}", tail_chars(text, max_chars - 1))
+                } else {
+                    text.to_string()
+                };
+                let galley = painter.layout_job(colored_text(&shown, font.clone(), !active));
+                painter.galley(pos2(text_x, py - galley.size().y / 2.0), galley, Color32::WHITE);
             }
         });
     }
@@ -550,22 +551,33 @@ fn tail_chars(s: &str, n: usize) -> &str {
     }
 }
 
+const CALL_COLOR: Color32 = Color32::from_rgb(255, 95, 85);
+const KEYWORD_COLOR: Color32 = Color32::from_rgb(110, 150, 255);
+const TEXT_COLOR: Color32 = Color32::from_rgb(215, 220, 225);
+
 /// Decoded text with callsigns in red and common CW words in blue, like CW Skimmer.
-fn colored_text(text: &str, size: f32) -> egui::text::LayoutJob {
+/// Words are runs of letters, digits and '/', so calls glued to punctuation or prosigns
+/// (`VE2GDI+`, `<BK>N3MK`) still highlight.
+fn colored_text(text: &str, font: FontId, dim: bool) -> egui::text::LayoutJob {
     let mut job = egui::text::LayoutJob::default();
-    let font = FontId::monospace(size);
-    for (i, tok) in text.split(' ').enumerate() {
-        if i > 0 {
-            job.append(" ", 0.0, egui::TextFormat::simple(font.clone(), Color32::GRAY));
-        }
-        let color = if crate::dsp::callsign::is_callsign(tok) {
-            Color32::from_rgb(255, 90, 80)
-        } else if matches!(tok, "CQ" | "TEST" | "TU" | "DE" | "QRZ" | "QRL?" | "K" | "5NN" | "73") {
-            Color32::from_rgb(110, 150, 255)
+    let fmt = |c: Color32| egui::TextFormat::simple(font.clone(), if dim { c.gamma_multiply(0.5) } else { c });
+    let is_word = |c: char| c.is_ascii_alphanumeric() || c == '/';
+    let mut rest = text;
+    while let Some(c) = rest.chars().next() {
+        let w = is_word(c);
+        let end = rest.find(|ch: char| is_word(ch) != w).unwrap_or(rest.len());
+        let (tok, tail) = rest.split_at(end);
+        let color = if !w {
+            TEXT_COLOR
+        } else if crate::dsp::callsign::is_callsign(tok) {
+            CALL_COLOR
+        } else if matches!(tok, "CQ" | "TEST" | "TU" | "DE" | "QRZ" | "QRL" | "K" | "5NN" | "73") {
+            KEYWORD_COLOR
         } else {
-            Color32::from_rgb(220, 220, 220)
+            TEXT_COLOR
         };
-        job.append(tok, 0.0, egui::TextFormat::simple(font.clone(), color));
+        job.append(tok, 0.0, fmt(color));
+        rest = tail;
     }
     job
 }

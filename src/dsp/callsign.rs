@@ -4,7 +4,8 @@ const NOT_CALLS: &[&str] = &["5NN", "ENN", "599", "579", "589", "73", "88", "TU"
 
 pub fn is_callsign(tok: &str) -> bool {
     let base = tok.split('/').max_by_key(|p| p.len()).unwrap_or(tok);
-    if !(3..=8).contains(&base.len()) || NOT_CALLS.contains(&base) || base.starts_with("5NN") {
+    // 3-character 1x1 specials exist, but in decoded noise they are mostly false hits.
+    if !(4..=8).contains(&base.len()) || NOT_CALLS.contains(&base) || base.starts_with("5NN") {
         return false;
     }
     let b = base.as_bytes();
