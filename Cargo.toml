@@ -1,0 +1,22 @@
+[package]
+name = "iqskimmer"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+crossbeam-channel = "0.5"
+eframe = "0.29"
+hound = "3.5"
+parking_lot = "0.12"
+rand = "0.8"
+rayon = "1"
+rustfft = "6"
+socket2 = { version = "0.5", features = ["all"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+
+[profile.dev]
+opt-level = 2
