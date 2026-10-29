@@ -18,6 +18,8 @@ pub enum SourceEvent {
     /// Absolute frequency (Hz) of the I/Q stream's center.
     Center(f64),
     Status(String),
+    /// Frequency (Hz) of the radio's slice A, if one is open.
+    SliceA(Option<f64>),
     /// Sent by the engine itself when switching sources, to discard state from the old one.
     Reset,
 }
@@ -32,9 +34,15 @@ pub enum SourceConfig {
 pub struct SourceHandle {
     stop: Arc<AtomicBool>,
     threads: Vec<JoinHandle<()>>,
+    radio: Option<Sender<flex::RadioCmd>>,
 }
 
 impl SourceHandle {
+    /// Tune the radio's slice A to `hz` in CW. Returns false if this source has no radio control.
+    pub fn tune_cw(&self, hz: f64) -> bool {
+        self.radio.as_ref().is_some_and(|r| r.send(flex::RadioCmd::TuneCw(hz)).is_ok())
+    }
+
     pub fn stop(mut self) {
         self.stop.store(true, Ordering::Relaxed);
         for t in self.threads.drain(..) {
@@ -45,16 +53,17 @@ impl SourceHandle {
 
 pub fn start(cfg: SourceConfig, tx: Sender<SourceEvent>) -> Result<SourceHandle, String> {
     let stop = Arc::new(AtomicBool::new(false));
-    let threads = match cfg {
+    let (threads, radio) = match cfg {
         SourceConfig::Flex { addr, daxiq_channel, rate } => {
-            flex::start(&addr, daxiq_channel, rate, tx, stop.clone())?
+            let (t, r) = flex::start(&addr, daxiq_channel, rate, tx, stop.clone())?;
+            (t, Some(r))
         }
-        SourceConfig::Wav { path, center_hz } => wav::start(path, center_hz, tx, stop.clone())?,
+        SourceConfig::Wav { path, center_hz } => (wav::start(path, center_hz, tx, stop.clone())?, None),
         SourceConfig::Synth { rate, center_hz, stations, min_snr_db } => {
-            synth::start(rate, center_hz, stations, min_snr_db, tx, stop.clone())
+            (synth::start(rate, center_hz, stations, min_snr_db, tx, stop.clone()), None)
         }
     };
-    Ok(SourceHandle { stop, threads })
+    Ok(SourceHandle { stop, threads, radio })
 }
 
 /// Paces a source to real time: call `wait(n)` after producing `n` samples.

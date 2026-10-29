@@ -46,6 +46,8 @@ pub struct App {
     view_rate: u32,
     selected: Option<u64>,
     hovered: Option<u64>,
+    /// Offset (Hz from center) of a signal the user double-clicked, to tune the radio to.
+    tune_request: Option<(u64, f64)>,
     floor_db: f32,
     range_db: f32,
 }
@@ -77,6 +79,7 @@ impl App {
             view_rate: 0,
             selected: None,
             hovered: None,
+            tune_request: None,
             floor_db: 2.0,
             range_db: 30.0,
         };
@@ -254,7 +257,7 @@ impl eframe::App for App {
         }
 
         // Snapshot shared state.
-        let (rate, center, bins, bin_hz, rows_per_s, decoders, status, load, new_rows) = {
+        let (rate, center, bins, bin_hz, rows_per_s, decoders, status, load, new_rows, slice_a) = {
             let mut s = self.engine.shared.lock();
             (
                 s.rate,
@@ -266,6 +269,7 @@ impl eframe::App for App {
                 s.status.clone(),
                 s.load,
                 std::mem::take(&mut s.new_rows),
+                s.slice_a_hz,
             )
         };
         if rate != self.view_rate && rate > 0 {
@@ -274,6 +278,13 @@ impl eframe::App for App {
             self.view = (-half, half);
         }
         self.wf.push_rows(new_rows, bins);
+
+        if let Some((id, off)) = self.tune_request.take() {
+            self.selected = Some(id);
+            if !self.engine.tune_cw(center + off) {
+                self.error = Some("Tuning needs a FlexRadio source".into());
+            }
+        }
 
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| self.toolbar(ui));
 
@@ -307,7 +318,7 @@ impl eframe::App for App {
                     ui.label(colored_text(tail_chars(&d.text, 160), FontId::monospace(15.0), false));
                 }
                 None => {
-                    ui.weak("Click a signal or spot to follow its decoded text. Scroll to zoom, drag to pan, double-click for full span.");
+                    ui.weak("Click a signal or spot to follow its decoded text. Double-click a dot or spot to tune slice A in CW. Scroll to zoom, drag to pan, double-click empty waterfall for full span.");
                 }
             }
         });
@@ -358,6 +369,18 @@ impl eframe::App for App {
                 let txt = if step >= 1000.0 { format!("{:.0}", f / 1e3) } else if step >= 100.0 { format!("{:.1}", f / 1e3) } else { format!("{:.2}", f / 1e3) };
                 painter.text(pos2(scale_rect.left() + 8.0, y), Align2::LEFT_CENTER, txt, FontId::monospace(11.0), Color32::LIGHT_GRAY);
                 f += step;
+            }
+
+            // Radio slice A marker.
+            if let Some(a) = slice_a {
+                let y = f_to_y(a - center);
+                if (wf_rect.top()..=wf_rect.bottom()).contains(&y) {
+                    let red = Color32::from_rgb(255, 70, 70);
+                    painter.line_segment([pos2(wf_rect.left(), y), pos2(scale_rect.left(), y)], Stroke::new(1.0_f32, red.gamma_multiply(0.7)));
+                    let tag = Rect::from_min_size(pos2(scale_rect.left() + 1.0, y - 7.0), vec2(14.0, 14.0));
+                    painter.rect_filled(tag, 2.0, red);
+                    painter.text(tag.center(), Align2::CENTER_CENTER, "A", FontId::monospace(11.0), Color32::WHITE);
+                }
             }
 
             // Highlight selected / hovered signals across the waterfall.
@@ -423,6 +446,9 @@ impl eframe::App for App {
                     if label_resp.clicked() {
                         self.selected = Some(d.id);
                     }
+                    if label_resp.double_clicked() {
+                        self.tune_request = Some((d.id, d.offset_hz));
+                    }
                 }
                 painter.line_segment([pos2(scale_rect.right() - 4.0, *y), pos2(x0 - 4.0, *py)], Stroke::new(1.0_f32, Color32::from_gray(140)));
                 if is_sel {
@@ -480,7 +506,21 @@ impl App {
         let limit = rate as f64 / 2.0;
         let y_to_f = |y: f32, lo: f64, hi: f64| hi - ((y - rect.top()) / rect.height()) as f64 * (hi - lo);
         if resp.double_clicked() {
-            self.view_rate = 0;
+            // On a signal's dot: tune the radio there. Anywhere else: back to full span.
+            let p = resp.interact_pointer_pos();
+            let dot_x = rect.right() - 6.0;
+            let hit = p.filter(|p| (p.x - dot_x).abs() < 10.0).and_then(|p| {
+                decoders
+                    .iter()
+                    .map(|d| (d, (rect.top() + ((hi - d.offset_hz) / (hi - lo)) as f32 * rect.height() - p.y).abs()))
+                    .filter(|(_, dy)| *dy < 8.0)
+                    .min_by(|a, b| a.1.total_cmp(&b.1))
+                    .map(|(d, _)| d)
+            });
+            match hit {
+                Some(d) => self.tune_request = Some((d.id, d.offset_hz)),
+                None => self.view_rate = 0,
+            }
             return;
         }
         if let Some(p) = resp.hover_pos() {

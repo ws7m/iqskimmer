@@ -85,6 +85,8 @@ pub struct Shared {
     /// DSP time / stream time.
     pub load: f32,
     pub stream_time_s: f64,
+    /// Radio slice A frequency (Hz), when the source is a radio.
+    pub slice_a_hz: Option<f64>,
 }
 
 enum Cmd {
@@ -131,6 +133,11 @@ impl Engine {
 
     pub fn is_running(&self) -> bool {
         self.source.is_some()
+    }
+
+    /// Tune the radio (if the source is one) to `hz` in CW.
+    pub fn tune_cw(&self, hz: f64) -> bool {
+        self.source.as_ref().is_some_and(|s| s.tune_cw(hz))
     }
 
     pub fn set_settings(&self, s: Settings) {
@@ -239,6 +246,7 @@ impl Dsp {
                 let mut s = self.shared.lock();
                 s.decoders.clear();
                 s.new_rows.clear();
+                s.slice_a_hz = None;
             }
             SourceEvent::Center(c) => {
                 if (c - self.center).abs() > 0.5 {
@@ -249,6 +257,7 @@ impl Dsp {
                 }
             }
             SourceEvent::Status(s) => self.shared.lock().status = s,
+            SourceEvent::SliceA(f) => self.shared.lock().slice_a_hz = f,
             SourceEvent::Samples { rate, mut data } => {
                 if rate != self.rate {
                     self.configure(rate);

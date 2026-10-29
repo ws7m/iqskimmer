@@ -7,7 +7,7 @@
 
 use super::SourceEvent;
 use super::vita;
-use crossbeam_channel::Sender;
+use crossbeam_channel::{Receiver, Sender, unbounded};
 use rustfft::num_complex::Complex32;
 use socket2::{Domain, Protocol, Socket, Type};
 use std::collections::HashMap;
@@ -19,6 +19,20 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 pub const CONTROL_PORT: u16 = 4992;
+
+/// Requests from the GUI to the radio.
+pub enum RadioCmd {
+    /// Tune slice A (or the lowest-numbered slice if there is no A) to this frequency in Hz, mode CW.
+    TuneCw(f64),
+}
+
+#[derive(Default)]
+struct Slice {
+    letter: String,
+    mhz: Option<f64>,
+    mode: String,
+    in_use: bool,
+}
 pub const DISCOVERY_PORT: u16 = 4992;
 
 #[derive(Clone, Debug, Default)]
@@ -100,7 +114,7 @@ pub fn start(
     want_rate: Option<u32>,
     tx: Sender<SourceEvent>,
     stop: Arc<AtomicBool>,
-) -> Result<Vec<JoinHandle<()>>, String> {
+) -> Result<(Vec<JoinHandle<()>>, Sender<RadioCmd>), String> {
     let target = if addr.contains(':') { addr.to_string() } else { format!("{addr}:{CONTROL_PORT}") };
     let sa = target
         .to_socket_addrs()
@@ -109,12 +123,14 @@ pub fn start(
         .ok_or_else(|| format!("{target}: no address"))?;
     let stream = TcpStream::connect_timeout(&sa, Duration::from_secs(3)).map_err(|e| format!("connect {sa}: {e}"))?;
     stream.set_nodelay(true).ok();
-    stream.set_read_timeout(Some(Duration::from_millis(300))).map_err(|e| e.to_string())?;
+    // Short timeout so GUI commands (tuning) are picked up promptly between status lines.
+    stream.set_read_timeout(Some(Duration::from_millis(50))).map_err(|e| e.to_string())?;
     let udp = UdpSocket::bind("0.0.0.0:0").map_err(|e| e.to_string())?;
     udp.set_read_timeout(Some(Duration::from_millis(300))).map_err(|e| e.to_string())?;
     let _ = udp.set_recv_buffer_size_hint();
     let udp_port = udp.local_addr().map_err(|e| e.to_string())?.port();
     let our_stream = Arc::new(StreamInfo::default());
+    let (cmd_tx, cmd_rx) = unbounded();
 
     let ctl_thread = {
         let tx = tx.clone();
@@ -124,14 +140,16 @@ pub fn start(
         let radio_ip = sa.ip();
         std::thread::Builder::new()
             .name("flex-control".into())
-            .spawn(move || control_loop(stream, udp, radio_ip, udp_port, channel, want_rate, tx, stop, our_stream))
+            .spawn(move || {
+                control_loop(stream, udp, radio_ip, udp_port, channel, want_rate, tx, stop, our_stream, cmd_rx)
+            })
             .map_err(|e| e.to_string())?
     };
     let data_thread = std::thread::Builder::new()
         .name("flex-vita".into())
         .spawn(move || data_loop(udp, tx, stop, our_stream))
         .map_err(|e| e.to_string())?;
-    Ok(vec![ctl_thread, data_thread])
+    Ok((vec![ctl_thread, data_thread], cmd_tx))
 }
 
 trait RecvBufHint {
@@ -156,6 +174,7 @@ fn control_loop(
     tx: Sender<SourceEvent>,
     stop: Arc<AtomicBool>,
     our_stream: Arc<StreamInfo>,
+    cmd_rx: Receiver<RadioCmd>,
 ) {
     let debug = std::env::var_os("IQDBG").is_some();
     let mut reader = BufReader::new(stream.try_clone().expect("clone tcp"));
@@ -170,6 +189,7 @@ fn control_loop(
     ctl.send("sub pan all");
     ctl.send("sub daxiq all");
     ctl.send("sub stream all");
+    ctl.send("sub slice all");
     let mut create_seq = ctl.send(&format!("stream create type=dax_iq daxiq_channel={channel}"));
     let mut legacy_tried = false;
 
@@ -178,9 +198,33 @@ fn control_loop(
     let mut our_pan: Option<String> = None;
     let mut last_center: Option<f64> = None;
     let ch = channel.to_string();
+    let mut slices: HashMap<String, Slice> = HashMap::new();
+    let mut last_slice_hz: Option<f64> = None;
+    // seq of the last `slice tune`, with the slice id and frequency
+    let mut tune_seq: Option<(u32, String, f64)> = None;
 
     let mut line = Vec::new();
     while !stop.load(Ordering::Relaxed) {
+        while let Ok(cmd) = cmd_rx.try_recv() {
+            match cmd {
+                RadioCmd::TuneCw(hz) => {
+                    let target = slices
+                        .iter()
+                        .filter(|(_, s)| s.in_use)
+                        .min_by_key(|(id, s)| (s.letter != "A", id.parse::<u32>().unwrap_or(u32::MAX)));
+                    match target {
+                        Some((id, sl)) => {
+                            if sl.mode != "CW" {
+                                ctl.send(&format!("slice set {id} mode=CW"));
+                            }
+                            let seq = ctl.send(&format!("slice tune {id} {:.6}", hz / 1e6));
+                            tune_seq = Some((seq, id.clone(), hz));
+                        }
+                        None => status("No slice open on the radio to tune".into()),
+                    }
+                }
+            }
+        }
         match reader.read_until(b'\n', &mut line) {
             Ok(0) => {
                 status("Radio closed the connection".into());
@@ -211,6 +255,25 @@ fn control_loop(
                 let seq: u32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
                 let code = u32::from_str_radix(parts.next().unwrap_or("1"), 16).unwrap_or(1);
                 let msg = parts.next().unwrap_or("");
+                if let Some((tseq, id, hz)) = &tune_seq {
+                    if seq == *tseq {
+                        if code == 0 {
+                            // The radio doesn't echo slice status back to the client that tuned it.
+                            if let Some(sl) = slices.get_mut(id) {
+                                sl.mhz = Some(hz / 1e6);
+                                sl.mode = "CW".into();
+                                status(format!("Slice {} tuned to {:.2} kHz CW", sl.letter, hz / 1e3));
+                                if sl.letter == "A" {
+                                    last_slice_hz = Some(*hz);
+                                    let _ = tx.send(SourceEvent::SliceA(Some(*hz)));
+                                }
+                            }
+                        } else {
+                            status(format!("Tune failed: error 0x{code:08X} {msg}"));
+                        }
+                        tune_seq = None;
+                    }
+                }
                 if seq == create_seq {
                     if code == 0 {
                         let id = u32::from_str_radix(msg.trim().trim_start_matches("0x"), 16).unwrap_or(0);
@@ -232,7 +295,26 @@ fn control_loop(
                 let Some((_, st)) = body.split_once('|') else { continue };
                 let words: Vec<&str> = st.split_whitespace().collect();
                 let m = kv(st);
-                if words.len() >= 3 && words[0] == "display" && words[1] == "pan" {
+                if words.len() >= 2 && words[0] == "slice" {
+                    let sl = slices.entry(words[1].to_string()).or_default();
+                    if let Some(v) = m.get("in_use") {
+                        sl.in_use = *v == "1";
+                    }
+                    if let Some(v) = m.get("index_letter") {
+                        sl.letter = v.to_string();
+                    }
+                    if let Some(v) = m.get("mode") {
+                        sl.mode = v.to_string();
+                    }
+                    if let Some(f) = m.get("RF_frequency").and_then(|v| v.parse().ok()) {
+                        sl.mhz = Some(f);
+                    }
+                    let a = slices.values().find(|s| s.in_use && s.letter == "A").and_then(|s| s.mhz).map(|f| f * 1e6);
+                    if a != last_slice_hz {
+                        last_slice_hz = a;
+                        let _ = tx.send(SourceEvent::SliceA(a));
+                    }
+                } else if words.len() >= 3 && words[0] == "display" && words[1] == "pan" {
                     let e = pans.entry(words[2].to_string()).or_default();
                     if let Some(c) = m.get("center").and_then(|v| v.parse().ok()) {
                         e.0 = Some(c);
