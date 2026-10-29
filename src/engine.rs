@@ -35,6 +35,28 @@ const IMPULSE_RISE_DB: f32 = 1.5;
 const MIN_PROMINENCE_DB: f32 = 8.0;
 const VIEW_TEXT: usize = 400;
 
+/// Separates Morse from digital modes (FT8, MFSK/Olivia tone pips) and noise, all of which
+/// also produce on/off keying in a single channel:
+/// * a speed pinned near the 60 WPM limit means no real dit length was found;
+/// * FSK tones keep a neighbouring frequency busy while this one is quiet;
+/// * marks should cluster into dits and dahs at roughly 1:3;
+/// * pips and noise decode almost entirely to dit-only characters (E I S H 5), which are
+///   about a quarter of real text.
+/// Looser limits keep a channel that already qualified, so it doesn't flicker.
+fn is_cw(c: &Channel) -> bool {
+    let (junk, chars) = c.dec.junk_share();
+    if c.dec.mark_count() < 8 || chars < 10 {
+        return false;
+    }
+    let (ratio, _) = c.dec.rhythm();
+    let wpm = c.dec.wpm();
+    if c.cw {
+        junk < 0.7 && wpm < 55.0 && c.neighbor_busy < 0.6 && (1.6..=5.0).contains(&ratio)
+    } else {
+        junk < 0.6 && wpm < 50.0 && c.neighbor_busy < 0.5 && (1.8..=4.5).contains(&ratio)
+    }
+}
+
 fn tail(s: &str, n: usize) -> &str {
     let mut i = s.len().saturating_sub(n);
     while !s.is_char_boundary(i) {
@@ -74,6 +96,11 @@ pub struct DecoderView {
     pub key_down: bool,
     /// Seconds since this decoder last produced a character.
     pub idle_s: f32,
+    pub neighbor_busy: f32,
+    pub rhythm: (f32, f32),
+    pub junk: f32,
+    /// Looks like Morse. Other decoders sit on digital modes or noise and aren't shown.
+    pub cw: bool,
 }
 
 #[derive(Default)]
@@ -171,6 +198,10 @@ struct Channel {
     last_char_t: f64,
     emitted_seen: u64,
     label_at: u64,
+    /// Fraction of gap time with a comparably strong signal close by (FSK tones hop there).
+    neighbor_busy: f32,
+    /// Keyed like Morse rather than a digital mode or noise; see `is_cw`.
+    cw: bool,
     peak_snr: f32,
     label: String,
     cq: bool,
@@ -383,9 +414,23 @@ impl Dsp {
         let env_dt = self.ch_hop as f64 / self.rate as f64;
         let n_frames = frames.len() / stride.max(1);
         let block_t0 = now - n_frames as f64 * env_dt;
+        let ring_lo = (40.0 / self.ch_bin_hz).ceil() as usize;
+        let ring_hi = (250.0 / self.ch_bin_hz).ceil() as usize;
+        let busy_k = (env_dt / 3.0) as f32;
         self.channels.par_iter_mut().for_each(|c| {
             for (i, f) in frames.chunks_exact(stride).enumerate() {
                 c.dec.feed(f[c.bin]);
+                if !c.dec.key_down() && c.dec.snr_db() >= 10.0 {
+                    // Strongest neighbour 40-250 Hz away while this channel is in a gap.
+                    let lo = c.bin.saturating_sub(ring_hi)..c.bin.saturating_sub(ring_lo);
+                    let hi = (c.bin + ring_lo).min(stride)..(c.bin + ring_hi + 1).min(stride);
+                    let ring = lo.chain(hi).map(|j| f[j]).fold(0.0f32, f32::max);
+                    // Comparable to this signal and clearly above noise (the max over ~36 noise
+                    // bins alone reaches ~5 dB above the mean).
+                    let level = (c.dec.signal_db() - 10.0).max(c.dec.noise_db() + 10.0);
+                    let busy = 10.0 * (ring + 1e-30).log10() > level;
+                    c.neighbor_busy += busy_k * (busy as u8 as f32 - c.neighbor_busy);
+                }
                 if c.dec.emitted != c.emitted_seen {
                     c.emitted_seen = c.dec.emitted;
                     c.last_char_t = block_t0 + i as f64 * env_dt;
@@ -551,6 +596,8 @@ impl Dsp {
             last_char_t: t,
             emitted_seen: 0,
             label_at: 0,
+            neighbor_busy: 0.0,
+            cw: false,
             peak_snr: c.snr,
             label: String::new(),
             cq: false,
@@ -563,6 +610,7 @@ impl Dsp {
             .channels
             .iter_mut()
             .map(|c| {
+                c.cw = is_cw(c);
                 if c.emitted_seen != c.label_at {
                     c.label_at = c.emitted_seen;
                     match callsign::spot(&c.dec.text) {
@@ -586,6 +634,10 @@ impl Dsp {
                     snr_db: c.dec.snr_db(),
                     key_down: c.dec.key_down(),
                     idle_s: (now - c.last_char_t) as f32,
+                    neighbor_busy: c.neighbor_busy,
+                    rhythm: c.dec.rhythm(),
+                    junk: c.dec.junk_share().0,
+                    cw: c.cw,
                 }
             })
             .collect();

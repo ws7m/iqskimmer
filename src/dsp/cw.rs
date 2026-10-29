@@ -27,6 +27,7 @@ pub struct CwDecoder {
     speed_known: bool,
     marks: VecDeque<f32>,
     spaces: VecDeque<f32>,
+    rhythm: (f32, f32),
     symbol: String,
     char_done: bool,
     word_done: bool,
@@ -51,6 +52,7 @@ impl CwDecoder {
             speed_known: false,
             marks: VecDeque::new(),
             spaces: VecDeque::new(),
+            rhythm: (1.0, 1.0),
             symbol: String::new(),
             char_done: true,
             word_done: true,
@@ -61,6 +63,32 @@ impl CwDecoder {
 
     pub fn wpm(&self) -> f32 {
         1.2 * self.fs / self.dit
+    }
+
+    pub fn signal_db(&self) -> f32 {
+        self.sig_db
+    }
+
+    pub fn noise_db(&self) -> f32 {
+        self.noise_db
+    }
+
+    /// Share of the last 40 decoded characters made only of dits (E I S H 5), with how many
+    /// characters were counted. About 25% in real text, 90%+ when keying on noise or
+    /// digital-mode tone pips. (T is left out: contest exchanges are full of "TEST".)
+    pub fn junk_share(&self) -> (f32, usize) {
+        let recent: Vec<char> = self.text.chars().rev().filter(|c| !c.is_whitespace()).take(40).collect();
+        let junk = recent.iter().filter(|c| matches!(c, 'E' | 'I' | 'S' | 'H' | '5')).count();
+        (if recent.is_empty() { 1.0 } else { junk as f32 / recent.len() as f32 }, recent.len())
+    }
+
+    pub fn mark_count(&self) -> usize {
+        self.marks.len()
+    }
+
+    /// Long/short mark-length ratio and the share of short marks over recent marks.
+    pub fn rhythm(&self) -> (f32, f32) {
+        self.rhythm
     }
 
     pub fn snr_db(&self) -> f32 {
@@ -186,6 +214,7 @@ impl CwDecoder {
                 split = k;
             }
         }
+        self.rhythm = rhythm(&m);
         let est = if best >= 1.8 {
             let short: f32 = m[..split].iter().sum();
             let long: f32 = m[split..].iter().sum();
@@ -209,6 +238,27 @@ impl CwDecoder {
         self.dit = if self.speed_known { 0.6 * self.dit + 0.4 * est } else { est };
         self.speed_known = self.marks.len() >= 4;
     }
+}
+
+/// Long/short cluster mean ratio and short share of sorted mark lengths, ignoring noise
+/// glitches (marks under a third of the median), which would otherwise form their own cluster.
+fn rhythm(sorted: &[f32]) -> (f32, f32) {
+    let median = sorted[sorted.len() / 2];
+    let m: Vec<f32> = sorted.iter().copied().filter(|&x| x >= 0.35 * median).collect();
+    let (mut best, mut split) = (1.0f32, 0usize);
+    for k in 1..m.len() {
+        let r = m[k] / m[k - 1].max(1.0);
+        if r > best {
+            best = r;
+            split = k;
+        }
+    }
+    if split == 0 {
+        return (1.0, 1.0);
+    }
+    let short = m[..split].iter().sum::<f32>() / split as f32;
+    let long = m[split..].iter().sum::<f32>() / (m.len() - split) as f32;
+    (long / short, split as f32 / m.len() as f32)
 }
 
 fn push_capped(q: &mut VecDeque<f32>, v: f32, cap: usize) {

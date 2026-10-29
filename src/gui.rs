@@ -383,6 +383,9 @@ impl eframe::App for App {
                 s.slice_a.clone(),
             )
         };
+        // Only Morse-like signals are shown; the rest are digital modes or noise.
+        let total_signals = decoders.len();
+        let decoders: Vec<DecoderView> = decoders.into_iter().filter(|d| d.cw).collect();
         if rate != self.view_rate && rate > 0 {
             self.view_rate = rate;
             let half = rate as f64 * 0.48;
@@ -402,13 +405,12 @@ impl eframe::App for App {
 
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                let active = decoders.iter().filter(|d| d.idle_s < 30.0 && !d.text.is_empty()).count();
                 ui.monospace(format!(
-                    "{:.3} kHz | {} kHz IQ | decoders {} ({} decoding) | DSP load {:.0}% | {}",
+                    "{:.3} kHz | {} kHz IQ | {} signals ({} CW) | DSP load {:.0}% | {}",
                     center / 1e3,
                     rate / 1000,
+                    total_signals,
                     decoders.len(),
-                    active,
                     load * 100.0,
                     status
                 ));

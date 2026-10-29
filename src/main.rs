@@ -105,9 +105,10 @@ fn headless(cfg: SourceConfig, settings: Settings, secs: f64) -> Result<(), Stri
         let s = engine.shared.lock();
         let center = s.center_hz;
         println!(
-            "--- t={:.0}s  {} decoders  load {:.0}%  {}",
+            "--- t={:.0}s  {} decoders ({} CW)  load {:.0}%  {}",
             s.stream_time_s,
             s.decoders.len(),
+            s.decoders.iter().filter(|d| d.cw).count(),
             s.load * 100.0,
             s.status
         );
@@ -115,17 +116,21 @@ fn headless(cfg: SourceConfig, settings: Settings, secs: f64) -> Result<(), Stri
             // Every decoder, including silent ones, for diagnosing detection.
             for d in &s.decoders {
                 eprintln!(
-                    "dbg {:>11.3} kHz snr {:>5.1} wpm {:>4.0} idle {:>5.1}s chars {:>4} key {}",
+                    "dbg {:>11.3} kHz snr {:>5.1} wpm {:>4.0} idle {:>5.1}s chars {:>4} key {} busy {:.2} ratio {:.2} short {:.2} junk {:.2}",
                     (center + d.offset_hz) / 1e3,
                     d.snr_db,
                     d.wpm,
                     d.idle_s,
                     d.text.trim().len(),
-                    d.key_down as u8
+                    d.key_down as u8,
+                    d.neighbor_busy,
+                    d.rhythm.0,
+                    d.rhythm.1,
+                    d.junk
                 );
             }
         }
-        for d in s.decoders.iter().filter(|d| !d.text.trim().is_empty()) {
+        for d in s.decoders.iter().filter(|d| d.cw && !d.text.trim().is_empty()) {
             let text: String = d.text.chars().rev().take(60).collect::<Vec<_>>().into_iter().rev().collect();
             println!(
                 "{:>11.2} kHz {:>3.0} WPM {:>3.0} dB  {:<12} | {}",
