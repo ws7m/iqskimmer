@@ -566,7 +566,16 @@ impl eframe::App for App {
                         Stroke::NONE,
                     ));
                 }
-                let text_x = x0 + 12.0;
+                // Estimated speed, fixed width so the text columns line up: "(25) ", "( 8) ".
+                let wpm_color = Color32::from_rgb(150, 160, 175);
+                painter.text(
+                    pos2(x0 + 12.0, *py),
+                    Align2::LEFT_CENTER,
+                    format!("({:>2.0})", d.wpm.min(99.0)),
+                    font.clone(),
+                    if active { wpm_color } else { wpm_color.gamma_multiply(0.5) },
+                );
+                let text_x = x0 + 12.0 + 5.0 * char_w;
                 let max_chars = ((row.right() - text_x - 4.0) / char_w).max(1.0) as usize;
                 let text = d.text.trim();
                 let shown = if text.chars().count() > max_chars {
