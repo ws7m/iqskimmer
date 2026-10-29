@@ -74,6 +74,12 @@ You can also choose the source and start or stop it from the toolbar. To load a 
 GUI controls: scroll to zoom, drag to pan, and double-click for the full span. Click a signal or a label to select it.
 If the spectrum looks mirrored, tick **Swap I/Q**.
 
+## Saving decoded text
+
+Click **Save text** in the toolbar, or start with `--save-text`. Each CW signal shown gets its own file in `Documents/IQSkimmer`, named `date_time_frequency.txt` (for example `20261028_193512_7024.77.txt`).
+A file starts with everything decoded so far. After a pause of 10 s or more, the next text starts a new line stamped with the time.
+**Open folder** shows the folder. The setting is remembered between launches.
+
 ## How it works
 
 | Stage | Where |

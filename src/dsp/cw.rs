@@ -34,6 +34,8 @@ pub struct CwDecoder {
     pub text: String,
     /// Monotonic count of characters ever emitted, for change detection.
     pub emitted: u64,
+    /// Bytes of text dropped from the front so far; with `text.len()` gives an absolute end.
+    drained: usize,
 }
 
 impl CwDecoder {
@@ -58,7 +60,20 @@ impl CwDecoder {
             word_done: true,
             text: String::new(),
             emitted: 0,
+            drained: 0,
         }
+    }
+
+    /// Absolute position of the end of the decoded text (it never moves backwards).
+    pub fn text_end(&self) -> usize {
+        self.drained + self.text.len()
+    }
+
+    /// Text decoded since absolute position `pos` (or all that is still buffered).
+    pub fn text_since(&self, pos: usize) -> &str {
+        let i = pos.saturating_sub(self.drained).min(self.text.len());
+        let i = (i..=self.text.len()).find(|&i| self.text.is_char_boundary(i)).unwrap_or(self.text.len());
+        &self.text[i..]
     }
 
     pub fn wpm(&self) -> f32 {
@@ -196,6 +211,7 @@ impl CwDecoder {
             let cut = self.text.len() - MAX_TEXT / 2;
             let cut = (cut..self.text.len()).find(|&i| self.text.is_char_boundary(i)).unwrap_or(0);
             self.text.drain(..cut);
+            self.drained += cut;
         }
     }
 

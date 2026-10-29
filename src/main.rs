@@ -5,6 +5,7 @@ mod dsp;
 mod engine;
 mod gui;
 mod source;
+mod textlog;
 
 use clap::Parser;
 use engine::{Engine, Settings};
@@ -46,6 +47,9 @@ struct Args {
     /// Swap I and Q (fixes a spectrum that appears mirrored)
     #[arg(long)]
     swap_iq: bool,
+    /// Save each decoder's text to Documents/IQSkimmer (date_time_frequency.txt)
+    #[arg(long)]
+    save_text: bool,
     /// Run without a GUI for N seconds, printing spots and decoded text
     #[arg(long, value_name = "SECONDS")]
     headless: Option<f64>,
@@ -80,7 +84,12 @@ fn main() -> Result<(), String> {
         }
         return Ok(());
     }
-    let settings = Settings { threshold_db: args.threshold, swap_iq: args.swap_iq, ..Default::default() };
+    let settings = Settings {
+        threshold_db: args.threshold,
+        swap_iq: args.swap_iq,
+        log_text: args.save_text,
+        ..Default::default()
+    };
     let cfg = if let Some(addr) = &args.flex {
         let addr = if addr == "auto" {
             let radios = source::flex::discover(Duration::from_secs(3))?;

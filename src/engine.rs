@@ -10,6 +10,7 @@ use crate::dsp::callsign;
 use crate::dsp::cw::CwDecoder;
 use crate::dsp::stft::Stft;
 use crate::source::{self, SliceState, SourceConfig, SourceEvent, SourceHandle};
+use crate::textlog::{TextLog, log_dir};
 use crossbeam_channel::{Receiver, Sender, bounded, select, unbounded};
 use parking_lot::Mutex;
 use rayon::prelude::*;
@@ -124,11 +125,13 @@ pub struct Settings {
     pub threshold_db: f32,
     pub swap_iq: bool,
     pub max_decoders: usize,
+    /// Save each shown decoder's text to Documents/IQSkimmer.
+    pub log_text: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { threshold_db: 12.0, swap_iq: false, max_decoders: 500 }
+        Self { threshold_db: 12.0, swap_iq: false, max_decoders: 500, log_text: false }
     }
 }
 
@@ -169,6 +172,8 @@ pub struct Shared {
     pub stream_time_s: f64,
     /// Radio slice A, when the source is a radio.
     pub slice_a: Option<SliceState>,
+    /// Text logging hit an error and turned itself off.
+    pub log_failed: bool,
 }
 
 enum Cmd {
@@ -254,6 +259,9 @@ struct Channel {
     /// Copies the keying of a stronger decoder close by: the same signal seen twice.
     duplicate: bool,
     key_hist: KeyHistory,
+    /// Open text log, and how much of the decoder's text it has written.
+    log: Option<TextLog>,
+    logged_to: usize,
     peak_snr: f32,
     label: String,
     cq: bool,
@@ -658,10 +666,53 @@ impl Dsp {
             cw: false,
             duplicate: false,
             key_hist: KeyHistory::default(),
+            log: None,
+            logged_to: 0,
             peak_snr: c.snr,
             label: String::new(),
             cq: false,
         });
+    }
+
+    /// Append new text of every shown decoder to its file. A decoder's file is created when it
+    /// is first shown and starts with everything decoded so far.
+    fn write_logs(&mut self, now: f64) {
+        if !self.settings.log_text {
+            for c in &mut self.channels {
+                c.log = None;
+            }
+            return;
+        }
+        let mut error = None;
+        for c in self.channels.iter_mut().filter(|c| c.cw && !c.duplicate) {
+            if c.log.is_none() {
+                match TextLog::create(self.center + c.offset) {
+                    Ok(l) => {
+                        c.log = Some(l);
+                        c.logged_to = 0;
+                    }
+                    Err(e) => {
+                        error = Some(e);
+                        break;
+                    }
+                }
+            }
+            let new = c.dec.text_since(c.logged_to);
+            if !new.is_empty() {
+                if let Err(e) = c.log.as_mut().expect("opened above").append(new, now) {
+                    error = Some(e);
+                    break;
+                }
+                c.logged_to = c.dec.text_end();
+            }
+        }
+        if let Some(e) = error {
+            // Stop rather than retry every 100 ms; the GUI shows the toggle as off.
+            self.settings.log_text = false;
+            let mut s = self.shared.lock();
+            s.status = format!("Text logging stopped: {} ({})", e, log_dir().display());
+            s.log_failed = true;
+        }
     }
 
     fn publish(&mut self, now: f64) {
@@ -670,6 +721,7 @@ impl Dsp {
             c.cw = is_cw(c);
         }
         mark_duplicates(&mut self.channels);
+        self.write_logs(now);
         let mut views: Vec<DecoderView> = self
             .channels
             .iter_mut()
@@ -740,6 +792,8 @@ mod tests {
             cw: true,
             duplicate: false,
             key_hist: KeyHistory::default(),
+            log: None,
+            logged_to: 0,
             peak_snr: 0.0,
             label: String::new(),
             cq: false,

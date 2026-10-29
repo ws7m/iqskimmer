@@ -43,6 +43,7 @@ struct Saved {
     threshold_db: f32,
     swap_iq: bool,
     max_decoders: usize,
+    log_text: bool,
     floor_db: f32,
     range_db: f32,
     /// A radio source was running at exit: reconnect on launch.
@@ -66,6 +67,7 @@ impl Default for Saved {
             threshold_db: s.threshold_db,
             swap_iq: s.swap_iq,
             max_decoders: s.max_decoders,
+            log_text: s.log_text,
             floor_db: 2.0,
             range_db: 30.0,
             was_running: false,
@@ -153,6 +155,7 @@ impl App {
             app.settings.threshold_db = sv.threshold_db;
             app.settings.swap_iq = sv.swap_iq;
             app.settings.max_decoders = sv.max_decoders;
+            app.settings.log_text = sv.log_text;
             app.floor_db = sv.floor_db;
             app.range_db = sv.range_db;
             if sv.was_running && app.kind == SrcKind::Flex {
@@ -302,6 +305,17 @@ impl App {
             if ui.button("Full span").clicked() {
                 self.view_rate = 0;
             }
+            ui.separator();
+            let dir = crate::textlog::log_dir();
+            let label = if self.settings.log_text { "Saving text" } else { "Save text" };
+            ui.toggle_value(&mut self.settings.log_text, label).on_hover_text(format!(
+                "Save each decoder's text to its own file (date_time_frequency.txt) in {}",
+                dir.display()
+            ));
+            if ui.button("Open folder").on_hover_text(dir.display().to_string()).clicked() {
+                let _ = std::fs::create_dir_all(&dir);
+                open_folder(&dir);
+            }
             if let Some(a) = &self.slice_a {
                 ui.separator();
                 ui.label(egui::RichText::new("A").strong().color(Color32::WHITE).background_color(Color32::from_rgb(255, 70, 70)));
@@ -330,6 +344,7 @@ impl eframe::App for App {
             threshold_db: self.settings.threshold_db,
             swap_iq: self.settings.swap_iq,
             max_decoders: self.settings.max_decoders,
+            log_text: self.settings.log_text,
             floor_db: self.floor_db,
             range_db: self.range_db,
             was_running: self.engine.is_running(),
@@ -383,6 +398,11 @@ impl eframe::App for App {
                 s.slice_a.clone(),
             )
         };
+        // The engine turns logging off if it can't write; reflect that in the button.
+        if std::mem::take(&mut self.engine.shared.lock().log_failed) {
+            self.settings.log_text = false;
+            self.sent_settings.log_text = false;
+        }
         // Only Morse-like signals are shown; the rest are digital modes or noise.
         let total_signals = decoders.len();
         let decoders: Vec<DecoderView> = decoders.into_iter().filter(|d| d.cw).collect();
@@ -684,6 +704,18 @@ impl App {
             }
         }
     }
+}
+
+/// Show a folder in Finder / Explorer / the desktop's file manager.
+fn open_folder(dir: &std::path::Path) {
+    let cmd = if cfg!(target_os = "macos") {
+        "open"
+    } else if cfg!(windows) {
+        "explorer"
+    } else {
+        "xdg-open"
+    };
+    let _ = std::process::Command::new(cmd).arg(dir).spawn();
 }
 
 fn priority(d: &DecoderView) -> f32 {
