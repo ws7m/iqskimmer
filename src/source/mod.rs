@@ -49,6 +49,11 @@ impl SourceHandle {
         self.radio.as_ref().is_some_and(|r| r.send(flex::RadioCmd::TuneCw(hz)).is_ok())
     }
 
+    /// Change the radio's I/Q sample rate. Returns false if this source has no radio control.
+    pub fn set_rate(&self, rate: u32) -> bool {
+        self.radio.as_ref().is_some_and(|r| r.send(flex::RadioCmd::SetRate(rate)).is_ok())
+    }
+
     pub fn stop(mut self) {
         self.stop.store(true, Ordering::Relaxed);
         for t in self.threads.drain(..) {

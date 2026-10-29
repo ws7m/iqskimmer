@@ -19,7 +19,7 @@ struct Args {
     /// DAX IQ channel (assign it to a panadapter in SmartSDR)
     #[arg(long, default_value_t = 1)]
     daxiq: u8,
-    /// Request a DAX IQ sample rate (24000, 48000, 96000, 192000); synthetic source rate
+    /// DAX IQ sample rate (24000, 48000, 96000, 192000; default 96000), or synthetic source rate (default 48000)
     #[arg(long)]
     rate: Option<u32>,
     /// Play a stereo I/Q WAV file (left = I, right = Q)
@@ -51,6 +51,9 @@ struct Args {
     discover: bool,
 }
 
+/// The radio's own default (48 kHz) covers only part of a typical panadapter.
+const DEFAULT_FLEX_RATE: u32 = 96_000;
+
 fn main() -> Result<(), String> {
     let args = Args::parse();
     if args.discover {
@@ -67,7 +70,7 @@ fn main() -> Result<(), String> {
         } else {
             addr.clone()
         };
-        Some(SourceConfig::Flex { addr, daxiq_channel: args.daxiq, rate: args.rate })
+        Some(SourceConfig::Flex { addr, daxiq_channel: args.daxiq, rate: Some(args.rate.unwrap_or(DEFAULT_FLEX_RATE)) })
     } else if let Some(path) = &args.wav {
         Some(SourceConfig::Wav { path: path.clone(), center_hz: args.center })
     } else if args.synth || args.headless.is_some() {

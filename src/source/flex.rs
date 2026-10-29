@@ -24,6 +24,8 @@ pub const CONTROL_PORT: u16 = 4992;
 pub enum RadioCmd {
     /// Tune slice A (or the lowest-numbered slice if there is no A) to this frequency in Hz, mode CW.
     TuneCw(f64),
+    /// Change the DAX IQ sample rate (24000, 48000, 96000 or 192000).
+    SetRate(u32),
 }
 
 #[derive(Default)]
@@ -170,7 +172,7 @@ fn control_loop(
     radio_ip: std::net::IpAddr,
     udp_port: u16,
     channel: u8,
-    want_rate: Option<u32>,
+    mut want_rate: Option<u32>,
     tx: Sender<SourceEvent>,
     stop: Arc<AtomicBool>,
     our_stream: Arc<StreamInfo>,
@@ -207,6 +209,14 @@ fn control_loop(
     while !stop.load(Ordering::Relaxed) {
         while let Ok(cmd) = cmd_rx.try_recv() {
             match cmd {
+                RadioCmd::SetRate(r) => {
+                    // Before the stream exists, the rate is applied when it is created.
+                    want_rate = Some(r);
+                    let id = our_stream.id.load(Ordering::Relaxed);
+                    if id != 0 {
+                        ctl.send(&format!("stream set 0x{id:08X} daxiq_rate={r}"));
+                    }
+                }
                 RadioCmd::TuneCw(hz) => {
                     let target = slices
                         .iter()

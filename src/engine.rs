@@ -140,6 +140,11 @@ impl Engine {
         self.source.as_ref().is_some_and(|s| s.tune_cw(hz))
     }
 
+    /// Change the radio's I/Q sample rate while running (radio sources only).
+    pub fn set_radio_rate(&self, rate: u32) -> bool {
+        self.source.as_ref().is_some_and(|s| s.set_rate(rate))
+    }
+
     pub fn set_settings(&self, s: Settings) {
         let _ = self.cmd_tx.send(Cmd::Settings(s));
     }

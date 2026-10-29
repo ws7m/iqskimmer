@@ -23,6 +23,8 @@ enum SrcKind {
 }
 
 const STORAGE_KEY: &str = "iqskimmer";
+/// DAX IQ rates the radio offers; the default (96 kHz) covers a typical panadapter.
+const FLEX_RATES: [u32; 4] = [24_000, 48_000, 96_000, 192_000];
 
 /// Settings remembered between launches (an app started from the Dock has no command line).
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -54,7 +56,7 @@ impl Default for Saved {
             kind: SrcKind::Synth,
             flex_addr: String::new(),
             flex_channel: 1,
-            flex_rate: 0,
+            flex_rate: FLEX_RATES[2],
             wav_path: String::new(),
             wav_center_khz: 7025.0,
             synth_rate: 48_000,
@@ -114,7 +116,7 @@ impl App {
             kind: SrcKind::Synth,
             flex_addr: String::new(),
             flex_channel: 1,
-            flex_rate: 0,
+            flex_rate: FLEX_RATES[2],
             wav_path: String::new(),
             wav_center_khz: 7025.0,
             synth_rate: 48_000,
@@ -140,7 +142,8 @@ impl App {
             app.kind = sv.kind;
             app.flex_addr = sv.flex_addr;
             app.flex_channel = sv.flex_channel;
-            app.flex_rate = sv.flex_rate;
+            // 0 was the old "radio setting" choice, which left the radio at 48 kHz.
+            app.flex_rate = if FLEX_RATES.contains(&sv.flex_rate) { sv.flex_rate } else { FLEX_RATES[2] };
             app.wav_path = sv.wav_path;
             app.wav_center_khz = sv.wav_center_khz;
             app.synth_rate = sv.synth_rate;
@@ -162,7 +165,7 @@ impl App {
                     app.kind = SrcKind::Flex;
                     app.flex_addr = addr.clone();
                     app.flex_channel = *daxiq_channel;
-                    app.flex_rate = rate.unwrap_or(0);
+                    app.flex_rate = rate.unwrap_or(FLEX_RATES[2]);
                 }
                 SourceConfig::Wav { path, center_hz } => {
                     app.kind = SrcKind::Wav;
@@ -191,7 +194,7 @@ impl App {
                 SourceConfig::Flex {
                     addr: self.flex_addr.trim().to_string(),
                     daxiq_channel: self.flex_channel,
-                    rate: (self.flex_rate > 0).then_some(self.flex_rate),
+                    rate: Some(self.flex_rate),
                 }
             }
             SrcKind::Wav => SourceConfig::Wav { path: self.wav_path.trim().into(), center_hz: self.wav_center_khz * 1e3 },
@@ -244,14 +247,6 @@ impl App {
                         }
                         ui.label("DAX IQ ch");
                         ui.add(egui::DragValue::new(&mut self.flex_channel).range(1..=4));
-                        egui::ComboBox::from_id_salt("flexrate")
-                            .selected_text(if self.flex_rate == 0 { "rate: radio".into() } else { format!("{} kHz", self.flex_rate / 1000) })
-                            .show_ui(ui, |ui| {
-                                for r in [0, 24_000, 48_000, 96_000, 192_000] {
-                                    let t = if r == 0 { "radio setting".into() } else { format!("{} kHz", r / 1000) };
-                                    ui.selectable_value(&mut self.flex_rate, r, t);
-                                }
-                            });
                     }
                     SrcKind::Wav => {
                         ui.label("File");
@@ -272,6 +267,22 @@ impl App {
                     }
                 }
             });
+            // The radio's I/Q rate can be changed while connected.
+            if self.kind == SrcKind::Flex {
+                let before = self.flex_rate;
+                egui::ComboBox::from_id_salt("flexrate")
+                    .selected_text(format!("{} kHz", self.flex_rate / 1000))
+                    .show_ui(ui, |ui| {
+                        for r in FLEX_RATES {
+                            ui.selectable_value(&mut self.flex_rate, r, format!("{} kHz", r / 1000));
+                        }
+                    })
+                    .response
+                    .on_hover_text("DAX IQ sample rate = width of spectrum skimmed");
+                if self.flex_rate != before && running {
+                    self.engine.set_radio_rate(self.flex_rate);
+                }
+            }
             let label = if running { "■ Stop" } else { "▶ Start" };
             if ui.button(label).clicked() {
                 if running {
