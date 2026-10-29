@@ -14,6 +14,7 @@ use crossbeam_channel::{Receiver, Sender, bounded, select, unbounded};
 use parking_lot::Mutex;
 use rayon::prelude::*;
 use rustfft::num_complex::Complex32;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -27,6 +28,11 @@ const NOISE_BLOCK: usize = 64;
 const MERGE_HZ: f64 = 45.0;
 const CAND_HITS: u32 = 4;
 const CHANNEL_TIMEOUT_S: f64 = 25.0;
+/// Median rise of the per-block noise level that marks a waterfall row as impulse noise.
+/// Normal rows scatter well under 1 dB around zero.
+const IMPULSE_RISE_DB: f32 = 1.5;
+/// How far a CW peak must stand above the quieter of its two sides, 80-140 Hz away.
+const MIN_PROMINENCE_DB: f32 = 8.0;
 const VIEW_TEXT: usize = 400;
 
 fn tail(s: &str, n: usize) -> &str {
@@ -178,6 +184,12 @@ struct Candidate {
 }
 
 struct Dsp {
+    impulse_run: u32,
+    impulse_flags: VecDeque<bool>,
+    pending_peaks: VecDeque<(f64, Vec<(f64, f32)>)>,
+    wf_win: usize,
+    /// Dev aid: with IQRECORD=<file.wav>, raw I/Q is written there (restarted on rate changes).
+    recorder: Option<hound::WavWriter<std::io::BufWriter<std::fs::File>>>,
     shared: Arc<Mutex<Shared>>,
     settings: Settings,
     rate: u32,
@@ -204,6 +216,11 @@ struct Dsp {
 
 fn run(src_rx: Receiver<SourceEvent>, cmd_rx: Receiver<Cmd>, shared: Arc<Mutex<Shared>>, settings: Settings) {
     let mut d = Dsp {
+        impulse_run: 0,
+        impulse_flags: VecDeque::new(),
+        pending_peaks: VecDeque::new(),
+        wf_win: 0,
+        recorder: None,
         shared,
         settings,
         rate: 0,
@@ -270,6 +287,12 @@ impl Dsp {
                 if self.settings.swap_iq {
                     data.iter_mut().for_each(|s| *s = Complex32::new(s.im, s.re));
                 }
+                if let Some(w) = &mut self.recorder {
+                    for s in &data {
+                        let _ = w.write_sample(s.re);
+                        let _ = w.write_sample(s.im);
+                    }
+                }
                 let t0 = Instant::now();
                 self.process(&data);
                 self.busy_s += t0.elapsed().as_secs_f64();
@@ -279,6 +302,15 @@ impl Dsp {
 
     fn configure(&mut self, rate: u32) {
         self.rate = rate;
+        if let Some(path) = std::env::var_os("IQRECORD") {
+            let spec = hound::WavSpec {
+                channels: 2,
+                sample_rate: rate,
+                bits_per_sample: 32,
+                sample_format: hound::SampleFormat::Float,
+            };
+            self.recorder = hound::WavWriter::create(path, spec).ok();
+        }
         let r = rate as f64;
         let wf_win = rate as usize / 16;
         let wf_fft = wf_win.next_power_of_two();
@@ -289,6 +321,10 @@ impl Dsp {
         self.ch_hop = (rate / ENVELOPE_RATE) as usize;
         self.ch_bin_hz = r / ch_fft as f64;
         self.wf = Some(Stft::new(wf_win, wf_fft, self.wf_hop));
+        self.wf_win = wf_win;
+        self.impulse_run = 0;
+        self.impulse_flags.clear();
+        self.pending_peaks.clear();
         self.ch = Some(Stft::new(ch_win, ch_fft, self.ch_hop));
         self.noise_blocks.clear();
         self.channels.clear();
@@ -303,6 +339,15 @@ impl Dsp {
         s.wf_bin_hz = self.wf_bin_hz;
         s.wf_rows_per_s = rate as f32 / self.wf_hop as f32;
         s.new_rows.clear();
+    }
+
+    fn rows_per_s(&self) -> f32 {
+        self.rate as f32 / self.wf_hop as f32
+    }
+
+    /// Waterfall rows sharing samples with any one row.
+    fn rows_per_window(&self) -> usize {
+        self.wf_win.div_ceil(self.wf_hop)
     }
 
     fn now(&self) -> f64 {
@@ -368,15 +413,34 @@ impl Dsp {
             self.noise_blocks = vec![0.0; nb];
         }
         let mut tmp = Vec::with_capacity(NOISE_BLOCK);
-        for (j, blk) in self.db_row.chunks(NOISE_BLOCK).enumerate() {
-            tmp.clear();
-            tmp.extend_from_slice(blk);
-            let k = tmp.len() * 3 / 10;
-            let (_, v, _) = tmp.select_nth_unstable_by(k, |a, b| a.total_cmp(b));
-            // 30th percentile of exponentially distributed power sits 4.5 dB below the mean.
-            let v = *v + 4.5;
-            let nbk = &mut self.noise_blocks[j];
-            *nbk = if fresh { v } else { *nbk + 0.05 * (v - *nbk) };
+        let levels: Vec<f32> = self
+            .db_row
+            .chunks(NOISE_BLOCK)
+            .map(|blk| {
+                tmp.clear();
+                tmp.extend_from_slice(blk);
+                let k = tmp.len() * 3 / 10;
+                // 30th percentile of exponentially distributed power sits 4.5 dB below the mean.
+                *tmp.select_nth_unstable_by(k, |a, b| a.total_cmp(b)).1 + 4.5
+            })
+            .collect();
+
+        // Impulse noise (static crashes, power-line noise) lifts the whole spectrum for a
+        // moment. The median block rise is immune to a few strong signals. A rise lasting
+        // over a second is a real level change (gain, band) and is accepted as the new floor.
+        let impulse = if fresh {
+            false
+        } else {
+            let mut rise: Vec<f32> = levels.iter().zip(&self.noise_blocks).map(|(v, nb)| v - nb).collect();
+            let m = rise.len() / 2;
+            *rise.select_nth_unstable_by(m, |a, b| a.total_cmp(b)).1 > IMPULSE_RISE_DB
+        };
+        self.impulse_run = if impulse { self.impulse_run + 1 } else { 0 };
+        let impulse = impulse && (self.impulse_run as f32) < self.rows_per_s();
+        if !impulse {
+            for (nbk, v) in self.noise_blocks.iter_mut().zip(&levels) {
+                *nbk = if fresh { *v } else { *nbk + 0.05 * (v - *nbk) };
+            }
         }
         self.nf_row.resize(n, 0.0);
         for i in 0..n {
@@ -400,7 +464,8 @@ impl Dsp {
         // Peak detection.
         let thr = self.settings.threshold_db;
         let k = (60.0 / self.wf_bin_hz).ceil() as usize;
-        let edge = (n / 30).max(k + 1);
+        let (side_lo, side_hi) = ((80.0 / self.wf_bin_hz) as usize, (140.0 / self.wf_bin_hz).ceil() as usize);
+        let edge = (n / 30).max(side_hi + 1);
         let half = n as f64 / 2.0;
         let t = self.now();
         let mut peaks = Vec::new();
@@ -413,13 +478,36 @@ impl Dsp {
             if (b - k..=b + k).any(|j| j != b && (db[j] > db[b] || (db[j] == db[b] && j < b))) {
                 continue;
             }
+            // CW is narrow: the spectrum must fall away on at least one side within ~100 Hz.
+            // Wide signals (SSB, FT8 and other digital modes) fill both sides.
+            let side = |r: std::ops::RangeInclusive<usize>| {
+                let len = r.clone().count() as f32;
+                10.0 * (r.map(|j| p[j]).sum::<f32>() / len + 1e-30).log10()
+            };
+            let quieter = side(b - side_hi..=b - side_lo).min(side(b + side_lo..=b + side_hi));
+            if db[b] - quieter < MIN_PROMINENCE_DB {
+                continue;
+            }
             let (l, c, r) = (db[b - 1], db[b], db[b + 1]);
             let den = l - 2.0 * c + r;
             let delta = if den.abs() > 1e-6 { (0.5 * (l - r) / den).clamp(-0.5, 0.5) } else { 0.0 };
             peaks.push(((b as f64 + delta as f64 - half) * self.wf_bin_hz, snr));
         }
-        for (off, snr) in peaks {
-            self.on_peak(off, snr, t);
+        // A burst smears across every row whose FFT window overlaps it, so hold each row's
+        // peaks until its neighbours are known and drop them if any neighbour was impulsive.
+        let guard = self.rows_per_window();
+        self.impulse_flags.push_back(impulse);
+        if self.impulse_flags.len() > 2 * guard + 1 {
+            self.impulse_flags.pop_front();
+        }
+        self.pending_peaks.push_back((t, peaks));
+        if self.pending_peaks.len() > guard {
+            let (pt, peaks) = self.pending_peaks.pop_front().expect("non-empty");
+            if !self.impulse_flags.iter().any(|f| *f) {
+                for (off, snr) in peaks {
+                    self.on_peak(off, snr, pt);
+                }
+            }
         }
         self.cands.retain(|c| t - c.last_t < 1.5);
     }

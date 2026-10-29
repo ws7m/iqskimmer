@@ -111,6 +111,20 @@ fn headless(cfg: SourceConfig, settings: Settings, secs: f64) -> Result<(), Stri
             s.load * 100.0,
             s.status
         );
+        if std::env::var_os("IQDBG").is_some() {
+            // Every decoder, including silent ones, for diagnosing detection.
+            for d in &s.decoders {
+                eprintln!(
+                    "dbg {:>11.3} kHz snr {:>5.1} wpm {:>4.0} idle {:>5.1}s chars {:>4} key {}",
+                    (center + d.offset_hz) / 1e3,
+                    d.snr_db,
+                    d.wpm,
+                    d.idle_s,
+                    d.text.trim().len(),
+                    d.key_down as u8
+                );
+            }
+        }
         for d in s.decoders.iter().filter(|d| !d.text.trim().is_empty()) {
             let text: String = d.text.chars().rev().take(60).collect::<Vec<_>>().into_iter().rev().collect();
             println!(
