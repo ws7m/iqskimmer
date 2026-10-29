@@ -15,6 +15,9 @@ rustfft = "6"
 serde = { version = "1", features = ["derive"] }
 socket2 = { version = "0.5", features = ["all"] }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_System_Console"] }
+
 [profile.release]
 opt-level = 3
 lto = "thin"

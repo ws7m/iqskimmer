@@ -25,6 +25,34 @@ Without that permission, connecting to the radio fails with "No route to host". 
 The app remembers the source settings. If it was connected to the radio when you quit, it reconnects on the next launch.
 The app is ad-hoc signed, so macOS may ask again after a rebuild.
 
+### Windows
+
+Install [Rust](https://rustup.rs) and the Visual Studio Build Tools (the "Desktop development with C++" workload), then run `cargo build --release`.
+That produces `target\release\iqskimmer.exe`, which runs on its own.
+On first connection, Windows Firewall asks whether to allow incoming network traffic. The I/Q stream arrives as UDP, so allow it on private networks.
+
+### Linux
+
+Install Rust and the GUI development packages, then run `cargo build --release`. On Debian/Ubuntu:
+
+```bash
+sudo apt-get install libxkbcommon-dev libgl1-mesa-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libwayland-dev
+```
+
+### Automated builds (GitHub Actions)
+
+`.github/workflows/build.yml` tests and builds all three platforms on every push to `main` and on every pull request.
+- **Artifacts:** each run uploads three downloads: the macOS app (Apple Silicon), the Windows `.exe` and the Linux binary. They are on the run's page under **Actions**.
+- **Releases:** push a version tag to create a GitHub release with all three attached:
+
+```bash
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+The downloads aren't signed with paid certificates, so each OS warns the first time:
+- **macOS:** right-click the app and choose **Open**, or run `xattr -dr com.apple.quarantine "IQ Skimmer.app"`.
+- **Windows:** SmartScreen shows "Windows protected your PC"; click **More info**, then **Run anyway**.
+
 ## Run
 
 ```bash

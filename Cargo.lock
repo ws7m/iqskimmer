@@ -1759,6 +1759,7 @@ dependencies = [
  "rustfft",
  "serde",
  "socket2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

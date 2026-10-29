@@ -1,3 +1,6 @@
+// A GUI app on Windows: no console window when started from Explorer. See attach_console.
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 mod dsp;
 mod engine;
 mod gui;
@@ -54,7 +57,22 @@ struct Args {
 /// The radio's own default (48 kHz) covers only part of a typical panadapter.
 const DEFAULT_FLEX_RATE: u32 = 96_000;
 
+/// A Windows GUI-subsystem program has no console, so `--help`, `--discover` and `--headless`
+/// would print nothing when run from a terminal. Borrow the terminal's console if there is one.
+#[cfg(windows)]
+fn attach_console() {
+    use windows_sys::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
+    // SAFETY: plain Win32 call with no pointers; fails harmlessly when there is no parent console.
+    unsafe {
+        AttachConsole(ATTACH_PARENT_PROCESS);
+    }
+}
+
+#[cfg(not(windows))]
+fn attach_console() {}
+
 fn main() -> Result<(), String> {
+    attach_console();
     let args = Args::parse();
     if args.discover {
         for r in source::flex::discover(Duration::from_secs(3))? {
