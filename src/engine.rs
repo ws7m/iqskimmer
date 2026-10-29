@@ -29,6 +29,9 @@ const NOISE_BLOCK: usize = 64;
 const MERGE_HZ: f64 = 45.0;
 const CAND_HITS: u32 = 4;
 const CHANNEL_TIMEOUT_S: f64 = 25.0;
+/// How long a shown decoder stays up through a pause, and stays listed after its last
+/// character. Covers a station calling CQ and then listening.
+pub const HOLD_S: f64 = 10.0;
 /// Median rise of the per-block noise level that marks a waterfall row as impulse noise.
 /// Normal rows scatter well under 1 dB around zero.
 const IMPULSE_RISE_DB: f32 = 1.5;
@@ -87,11 +90,10 @@ impl KeyHistory {
 /// A strong signal can be detected twice a little apart in frequency. Both decoders then hear
 /// the same keying and print identical text, so hide the weaker of any two CW decoders that
 /// are within 300 Hz and key down together almost all the time.
-fn mark_duplicates(channels: &mut [Channel]) {
-    for c in channels.iter_mut() {
-        c.duplicate = false;
-    }
-    let mut idx: Vec<usize> = (0..channels.len()).filter(|&i| channels[i].cw).collect();
+/// Pairs that don't key during the 2 s history (a pause) can't be compared, so a duplicate
+/// stays hidden for `HOLD_S` after it was last seen copying its neighbour.
+fn mark_duplicates(channels: &mut [Channel], now: f64) {
+    let mut idx: Vec<usize> = (0..channels.len()).filter(|&i| channels[i].shown(now)).collect();
     idx.sort_by(|&a, &b| channels[a].offset.total_cmp(&channels[b].offset));
     for (n, &i) in idx.iter().enumerate() {
         for &j in &idx[n + 1..] {
@@ -101,7 +103,7 @@ fn mark_duplicates(channels: &mut [Channel]) {
             let (both, either) = channels[i].key_hist.overlap(&channels[j].key_hist);
             if either >= 50 && both as f32 > 0.8 * either as f32 {
                 let weaker = if channels[i].dec.snr_db() < channels[j].dec.snr_db() { i } else { j };
-                channels[weaker].duplicate = true;
+                channels[weaker].duplicate_until = now + HOLD_S;
             }
         }
     }
@@ -256,8 +258,10 @@ struct Channel {
     neighbor_busy: f32,
     /// Keyed like Morse rather than a digital mode or noise; see `is_cw`.
     cw: bool,
-    /// Copies the keying of a stronger decoder close by: the same signal seen twice.
-    duplicate: bool,
+    /// Shown until then: refreshed while `cw` holds, so a station pausing to listen stays up.
+    shown_until: f64,
+    /// Hidden until then as a copy of a stronger decoder close by (the same signal seen twice).
+    duplicate_until: f64,
     key_hist: KeyHistory,
     /// Open text log, and how much of the decoder's text it has written.
     log: Option<TextLog>,
@@ -265,6 +269,18 @@ struct Channel {
     peak_snr: f32,
     label: String,
     cq: bool,
+}
+
+impl Channel {
+    /// Counts as CW now or did within the last `HOLD_S`.
+    fn shown(&self, now: f64) -> bool {
+        self.cw || now < self.shown_until
+    }
+
+    /// Shown, and not hidden as a duplicate.
+    fn visible(&self, now: f64) -> bool {
+        self.shown(now) && now >= self.duplicate_until
+    }
 }
 
 struct Candidate {
@@ -664,7 +680,8 @@ impl Dsp {
             label_at: 0,
             neighbor_busy: 0.0,
             cw: false,
-            duplicate: false,
+            shown_until: f64::NEG_INFINITY,
+            duplicate_until: f64::NEG_INFINITY,
             key_hist: KeyHistory::default(),
             log: None,
             logged_to: 0,
@@ -684,7 +701,7 @@ impl Dsp {
             return;
         }
         let mut error = None;
-        for c in self.channels.iter_mut().filter(|c| c.cw && !c.duplicate) {
+        for c in self.channels.iter_mut().filter(|c| c.visible(now)) {
             if c.log.is_none() {
                 match TextLog::create(self.center + c.offset) {
                     Ok(l) => {
@@ -719,8 +736,11 @@ impl Dsp {
         self.last_publish = now;
         for c in &mut self.channels {
             c.cw = is_cw(c);
+            if c.cw {
+                c.shown_until = now + HOLD_S;
+            }
         }
-        mark_duplicates(&mut self.channels);
+        mark_duplicates(&mut self.channels, now);
         self.write_logs(now);
         let mut views: Vec<DecoderView> = self
             .channels
@@ -752,7 +772,7 @@ impl Dsp {
                     neighbor_busy: c.neighbor_busy,
                     rhythm: c.dec.rhythm(),
                     junk: c.dec.junk_share().0,
-                    cw: c.cw && !c.duplicate,
+                    cw: c.visible(now),
                 }
             })
             .collect();
@@ -790,7 +810,8 @@ mod tests {
             label_at: 0,
             neighbor_busy: 0.0,
             cw: true,
-            duplicate: false,
+            shown_until: f64::NEG_INFINITY,
+            duplicate_until: f64::NEG_INFINITY,
             key_hist: KeyHistory::default(),
             log: None,
             logged_to: 0,
@@ -808,10 +829,10 @@ mod tests {
     fn hides_one_of_two_decoders_keying_together() {
         let dits = |i: usize| (i / 15) % 2 == 0;
         let mut chans = vec![channel(1, 1000.0, dits), channel(2, 1070.0, dits), channel(3, 2000.0, dits)];
-        mark_duplicates(&mut chans);
+        mark_duplicates(&mut chans, 0.0);
         // 1 and 2 are the same signal; 3 is too far away to be one of them.
-        assert_eq!(chans.iter().filter(|c| c.duplicate).count(), 1);
-        assert!(!chans[2].duplicate);
+        assert_eq!(chans.iter().filter(|c| !c.visible(0.0)).count(), 1);
+        assert!(chans[2].visible(0.0));
     }
 
     #[test]
@@ -826,8 +847,8 @@ mod tests {
             }
         }
         let mut chans = vec![early, late];
-        mark_duplicates(&mut chans);
-        assert_eq!(chans.iter().filter(|c| c.duplicate).count(), 1);
+        mark_duplicates(&mut chans, 0.0);
+        assert_eq!(chans.iter().filter(|c| !c.visible(0.0)).count(), 1);
     }
 
     #[test]
@@ -836,7 +857,7 @@ mod tests {
             channel(1, 1000.0, |i| (i / 15) % 2 == 0),
             channel(2, 1100.0, |i| (i / 22) % 3 == 0),
         ];
-        mark_duplicates(&mut chans);
-        assert!(chans.iter().all(|c| !c.duplicate));
+        mark_duplicates(&mut chans, 0.0);
+        assert!(chans.iter().all(|c| c.visible(0.0)));
     }
 }

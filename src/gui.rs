@@ -1,7 +1,7 @@
 //! egui front end: vertical-frequency waterfall (time scrolls right-to-left, newest at the right),
 //! frequency scale, spot labels aligned to each signal's frequency, and the selected decoder's text.
 
-use crate::engine::{DecoderView, Engine, Settings, wf_db};
+use crate::engine::{DecoderView, Engine, HOLD_S, Settings, wf_db};
 use crate::source::{SliceState, SourceConfig};
 use crate::source::flex::{self, RadioInfo};
 use crossbeam_channel::Receiver;
@@ -449,7 +449,7 @@ impl eframe::App for App {
                             d.snr_db
                         ));
                     });
-                    ui.label(colored_text(tail_chars(&d.text, 160), FontId::monospace(15.0), false));
+                    ui.label(colored_text(tail_chars(&d.text, 160), FontId::monospace(15.0)));
                 }
                 None => {
                     ui.weak("Click a signal or spot to follow its decoded text. Double-click a dot or spot to tune slice A in CW. Scroll to zoom, drag to pan, double-click empty waterfall for full span.");
@@ -543,7 +543,8 @@ impl eframe::App for App {
                     let c = if d.key_down { Color32::from_rgb(120, 255, 140) } else { Color32::from_rgb(230, 210, 60) };
                     painter.circle_filled(pos2(scale_rect.right() - 6.0, y), 3.0, c);
                     painter.line_segment([pos2(wf_rect.right() - 8.0, y), pos2(wf_rect.right(), y)], Stroke::new(2.0_f32, c));
-                    if d.text.trim().is_empty() || d.idle_s > 120.0 {
+                    // Listed until HOLD_S after the last decoded character.
+                    if d.text.trim().is_empty() || d.idle_s as f64 > HOLD_S {
                         return None;
                     }
                     Some((d, y))
@@ -591,8 +592,7 @@ impl eframe::App for App {
                     painter.rect_filled(row, 2.0, Color32::from_gray(50));
                 }
                 // CQ marker column, then as much of the running text as fits.
-                let active = d.idle_s < 30.0;
-                if d.cq && active {
+                if d.cq {
                     painter.add(egui::Shape::convex_polygon(
                         vec![pos2(x0, py - 5.0), pos2(x0 + 8.0, *py), pos2(x0, py + 5.0)],
                         Color32::from_rgb(60, 200, 60),
@@ -606,7 +606,7 @@ impl eframe::App for App {
                     Align2::LEFT_CENTER,
                     format!("({:>2.0})", d.wpm.min(99.0)),
                     font.clone(),
-                    if active { wpm_color } else { wpm_color.gamma_multiply(0.5) },
+                    wpm_color,
                 );
                 let text_x = x0 + 12.0 + 5.0 * char_w;
                 let max_chars = ((row.right() - text_x - 4.0) / char_w).max(1.0) as usize;
@@ -616,7 +616,7 @@ impl eframe::App for App {
                 } else {
                     text.to_string()
                 };
-                let galley = painter.layout_job(colored_text(&shown, font.clone(), !active));
+                let galley = painter.layout_job(colored_text(&shown, font.clone()));
                 painter.galley(pos2(text_x, py - galley.size().y / 2.0), galley, Color32::WHITE);
             }
         });
@@ -753,9 +753,9 @@ const TEXT_COLOR: Color32 = Color32::from_rgb(215, 220, 225);
 /// Decoded text with callsigns in red and common CW words in blue, like CW Skimmer.
 /// Words are runs of letters, digits and '/', so calls glued to punctuation or prosigns
 /// (`VE2GDI+`, `<BK>N3MK`) still highlight.
-fn colored_text(text: &str, font: FontId, dim: bool) -> egui::text::LayoutJob {
+fn colored_text(text: &str, font: FontId) -> egui::text::LayoutJob {
     let mut job = egui::text::LayoutJob::default();
-    let fmt = |c: Color32| egui::TextFormat::simple(font.clone(), if dim { c.gamma_multiply(0.5) } else { c });
+    let fmt = |c: Color32| egui::TextFormat::simple(font.clone(), c);
     let is_word = |c: char| c.is_ascii_alphanumeric() || c == '/';
     let mut rest = text;
     while let Some(c) = rest.chars().next() {
