@@ -11,6 +11,10 @@ BUNDLE_ID="io.iqskimmer.IQSkimmer"
 APP_NAME="IQ Skimmer"
 
 cd "$(dirname "$0")/.."
+# rustup installs here; shells that haven't sourced ~/.cargo/env won't have it on PATH.
+if ! command -v cargo >/dev/null && [ -x "$HOME/.cargo/bin/cargo" ]; then
+    PATH="$HOME/.cargo/bin:$PATH"
+fi
 cargo build --release
 
 VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
