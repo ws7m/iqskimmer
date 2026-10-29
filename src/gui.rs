@@ -524,8 +524,8 @@ impl eframe::App for App {
                     let y = f_to_y(d.offset_hz);
                     if (wf_rect.top()..=wf_rect.bottom()).contains(&y) {
                         let r = Rect::from_center_size(pos2(wf_rect.center().x, y), vec2(wf_rect.width(), band_px * 2.0));
-                        painter.rect_filled(r, 0.0, Color32::from_rgba_unmultiplied(80, 255, 120, alpha));
-                        painter.rect_stroke(r, 0.0, Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(80, 255, 120, alpha * 3)));
+                        painter.rect_filled(r, 0.0, Color32::from_rgba_unmultiplied(60, 110, 230, alpha));
+                        painter.rect_stroke(r, 0.0, Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(120, 160, 255, alpha * 3)));
                     }
                 }
             }
@@ -586,7 +586,7 @@ impl eframe::App for App {
                 }
                 painter.line_segment([pos2(scale_rect.right() - 4.0, *y), pos2(x0 - 4.0, *py)], Stroke::new(1.0_f32, Color32::from_gray(140)));
                 if is_sel {
-                    painter.rect_filled(row, 2.0, Color32::from_rgb(40, 150, 60));
+                    painter.rect_filled(row, 2.0, Color32::from_rgb(30, 55, 120));
                 } else if is_hover {
                     painter.rect_filled(row, 2.0, Color32::from_gray(50));
                 }
