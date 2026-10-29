@@ -18,10 +18,16 @@ pub enum SourceEvent {
     /// Absolute frequency (Hz) of the I/Q stream's center.
     Center(f64),
     Status(String),
-    /// Frequency (Hz) of the radio's slice A, if one is open.
-    SliceA(Option<f64>),
+    /// The radio's slice A, if one is open.
+    SliceA(Option<SliceState>),
     /// Sent by the engine itself when switching sources, to discard state from the old one.
     Reset,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SliceState {
+    pub hz: f64,
+    pub mode: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]

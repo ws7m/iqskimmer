@@ -5,7 +5,7 @@
 //! The DAX IQ channel must be assigned to a panadapter (in SmartSDR, or any other client);
 //! the stream's center frequency follows that panadapter.
 
-use super::SourceEvent;
+use super::{SliceState, SourceEvent};
 use super::vita;
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use rustfft::num_complex::Complex32;
@@ -199,7 +199,7 @@ fn control_loop(
     let mut last_center: Option<f64> = None;
     let ch = channel.to_string();
     let mut slices: HashMap<String, Slice> = HashMap::new();
-    let mut last_slice_hz: Option<f64> = None;
+    let mut last_slice: Option<SliceState> = None;
     // seq of the last `slice tune`, with the slice id and frequency
     let mut tune_seq: Option<(u32, String, f64)> = None;
 
@@ -264,8 +264,8 @@ fn control_loop(
                                 sl.mode = "CW".into();
                                 status(format!("Slice {} tuned to {:.2} kHz CW", sl.letter, hz / 1e3));
                                 if sl.letter == "A" {
-                                    last_slice_hz = Some(*hz);
-                                    let _ = tx.send(SourceEvent::SliceA(Some(*hz)));
+                                    last_slice = Some(SliceState { hz: *hz, mode: "CW".into() });
+                                    let _ = tx.send(SourceEvent::SliceA(last_slice.clone()));
                                 }
                             }
                         } else {
@@ -309,9 +309,12 @@ fn control_loop(
                     if let Some(f) = m.get("RF_frequency").and_then(|v| v.parse().ok()) {
                         sl.mhz = Some(f);
                     }
-                    let a = slices.values().find(|s| s.in_use && s.letter == "A").and_then(|s| s.mhz).map(|f| f * 1e6);
-                    if a != last_slice_hz {
-                        last_slice_hz = a;
+                    let a = slices
+                        .values()
+                        .find(|s| s.in_use && s.letter == "A")
+                        .and_then(|s| s.mhz.map(|f| SliceState { hz: f * 1e6, mode: s.mode.clone() }));
+                    if a != last_slice {
+                        last_slice = a.clone();
                         let _ = tx.send(SourceEvent::SliceA(a));
                     }
                 } else if words.len() >= 3 && words[0] == "display" && words[1] == "pan" {

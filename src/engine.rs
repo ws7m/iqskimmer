@@ -9,7 +9,7 @@
 use crate::dsp::callsign;
 use crate::dsp::cw::CwDecoder;
 use crate::dsp::stft::Stft;
-use crate::source::{self, SourceConfig, SourceEvent, SourceHandle};
+use crate::source::{self, SliceState, SourceConfig, SourceEvent, SourceHandle};
 use crossbeam_channel::{Receiver, Sender, bounded, select, unbounded};
 use parking_lot::Mutex;
 use rayon::prelude::*;
@@ -85,8 +85,8 @@ pub struct Shared {
     /// DSP time / stream time.
     pub load: f32,
     pub stream_time_s: f64,
-    /// Radio slice A frequency (Hz), when the source is a radio.
-    pub slice_a_hz: Option<f64>,
+    /// Radio slice A, when the source is a radio.
+    pub slice_a: Option<SliceState>,
 }
 
 enum Cmd {
@@ -246,7 +246,7 @@ impl Dsp {
                 let mut s = self.shared.lock();
                 s.decoders.clear();
                 s.new_rows.clear();
-                s.slice_a_hz = None;
+                s.slice_a = None;
             }
             SourceEvent::Center(c) => {
                 if (c - self.center).abs() > 0.5 {
@@ -257,7 +257,7 @@ impl Dsp {
                 }
             }
             SourceEvent::Status(s) => self.shared.lock().status = s,
-            SourceEvent::SliceA(f) => self.shared.lock().slice_a_hz = f,
+            SourceEvent::SliceA(a) => self.shared.lock().slice_a = a,
             SourceEvent::Samples { rate, mut data } => {
                 if rate != self.rate {
                     self.configure(rate);

@@ -2,7 +2,7 @@
 //! frequency scale, spot labels aligned to each signal's frequency, and the selected decoder's text.
 
 use crate::engine::{DecoderView, Engine, Settings, wf_db};
-use crate::source::SourceConfig;
+use crate::source::{SliceState, SourceConfig};
 use crate::source::flex::{self, RadioInfo};
 use crossbeam_channel::Receiver;
 use eframe::egui::{
@@ -48,6 +48,7 @@ pub struct App {
     hovered: Option<u64>,
     /// Offset (Hz from center) of a signal the user double-clicked, to tune the radio to.
     tune_request: Option<(u64, f64)>,
+    slice_a: Option<SliceState>,
     floor_db: f32,
     range_db: f32,
 }
@@ -80,6 +81,7 @@ impl App {
             selected: None,
             hovered: None,
             tune_request: None,
+            slice_a: None,
             floor_db: 2.0,
             range_db: 30.0,
         };
@@ -218,6 +220,11 @@ impl App {
             if ui.button("Full span").clicked() {
                 self.view_rate = 0;
             }
+            if let Some(a) = &self.slice_a {
+                ui.separator();
+                ui.label(egui::RichText::new("A").strong().color(Color32::WHITE).background_color(Color32::from_rgb(255, 70, 70)));
+                ui.label(egui::RichText::new(format!("{:.3} kHz  {}", a.hz / 1e3, a.mode)).monospace().size(14.0).strong());
+            }
         });
         if let Some(e) = &self.error {
             ui.colored_label(Color32::from_rgb(255, 120, 100), e);
@@ -269,7 +276,7 @@ impl eframe::App for App {
                 s.status.clone(),
                 s.load,
                 std::mem::take(&mut s.new_rows),
-                s.slice_a_hz,
+                s.slice_a.clone(),
             )
         };
         if rate != self.view_rate && rate > 0 {
@@ -286,6 +293,7 @@ impl eframe::App for App {
             }
         }
 
+        self.slice_a = slice_a.clone();
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| self.toolbar(ui));
 
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
@@ -372,8 +380,8 @@ impl eframe::App for App {
             }
 
             // Radio slice A marker.
-            if let Some(a) = slice_a {
-                let y = f_to_y(a - center);
+            if let Some(a) = &slice_a {
+                let y = f_to_y(a.hz - center);
                 if (wf_rect.top()..=wf_rect.bottom()).contains(&y) {
                     let red = Color32::from_rgb(255, 70, 70);
                     painter.line_segment([pos2(wf_rect.left(), y), pos2(scale_rect.left(), y)], Stroke::new(1.0_f32, red.gamma_multiply(0.7)));
