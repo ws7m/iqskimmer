@@ -57,6 +57,55 @@ fn is_cw(c: &Channel) -> bool {
     }
 }
 
+/// Recent key-down state of a channel, one bit per envelope frame (~2 s). Bits are placed by
+/// the engine's global frame number, so histories of different channels line up.
+#[derive(Default)]
+struct KeyHistory {
+    bits: [u64; 8],
+}
+
+impl KeyHistory {
+    fn set(&mut self, frame: u64, down: bool) {
+        let pos = (frame % (64 * self.bits.len() as u64)) as usize;
+        let (w, b) = (pos / 64, pos % 64);
+        self.bits[w] = (self.bits[w] & !(1 << b)) | ((down as u64) << b);
+    }
+
+    /// Frames where both are keyed, and where either is.
+    fn overlap(&self, other: &Self) -> (u32, u32) {
+        let mut both = 0;
+        let mut either = 0;
+        for (a, b) in self.bits.iter().zip(&other.bits) {
+            both += (a & b).count_ones();
+            either += (a | b).count_ones();
+        }
+        (both, either)
+    }
+}
+
+/// A strong signal can be detected twice a little apart in frequency. Both decoders then hear
+/// the same keying and print identical text, so hide the weaker of any two CW decoders that
+/// are within 300 Hz and key down together almost all the time.
+fn mark_duplicates(channels: &mut [Channel]) {
+    for c in channels.iter_mut() {
+        c.duplicate = false;
+    }
+    let mut idx: Vec<usize> = (0..channels.len()).filter(|&i| channels[i].cw).collect();
+    idx.sort_by(|&a, &b| channels[a].offset.total_cmp(&channels[b].offset));
+    for (n, &i) in idx.iter().enumerate() {
+        for &j in &idx[n + 1..] {
+            if channels[j].offset - channels[i].offset > 300.0 {
+                break;
+            }
+            let (both, either) = channels[i].key_hist.overlap(&channels[j].key_hist);
+            if either >= 50 && both as f32 > 0.8 * either as f32 {
+                let weaker = if channels[i].dec.snr_db() < channels[j].dec.snr_db() { i } else { j };
+                channels[weaker].duplicate = true;
+            }
+        }
+    }
+}
+
 fn tail(s: &str, n: usize) -> &str {
     let mut i = s.len().saturating_sub(n);
     while !s.is_char_boundary(i) {
@@ -202,6 +251,9 @@ struct Channel {
     neighbor_busy: f32,
     /// Keyed like Morse rather than a digital mode or noise; see `is_cw`.
     cw: bool,
+    /// Copies the keying of a stronger decoder close by: the same signal seen twice.
+    duplicate: bool,
+    key_hist: KeyHistory,
     peak_snr: f32,
     label: String,
     cq: bool,
@@ -215,6 +267,8 @@ struct Candidate {
 }
 
 struct Dsp {
+    /// Envelope frames processed, for aligning per-channel key histories.
+    env_frames: u64,
     impulse_run: u32,
     impulse_flags: VecDeque<bool>,
     pending_peaks: VecDeque<(f64, Vec<(f64, f32)>)>,
@@ -247,6 +301,7 @@ struct Dsp {
 
 fn run(src_rx: Receiver<SourceEvent>, cmd_rx: Receiver<Cmd>, shared: Arc<Mutex<Shared>>, settings: Settings) {
     let mut d = Dsp {
+        env_frames: 0,
         impulse_run: 0,
         impulse_flags: VecDeque::new(),
         pending_peaks: VecDeque::new(),
@@ -417,9 +472,12 @@ impl Dsp {
         let ring_lo = (40.0 / self.ch_bin_hz).ceil() as usize;
         let ring_hi = (250.0 / self.ch_bin_hz).ceil() as usize;
         let busy_k = (env_dt / 3.0) as f32;
+        let frame0 = self.env_frames;
+        self.env_frames += n_frames as u64;
         self.channels.par_iter_mut().for_each(|c| {
             for (i, f) in frames.chunks_exact(stride).enumerate() {
                 c.dec.feed(f[c.bin]);
+                c.key_hist.set(frame0 + i as u64, c.dec.key_down());
                 if !c.dec.key_down() && c.dec.snr_db() >= 10.0 {
                     // Strongest neighbour 40-250 Hz away while this channel is in a gap.
                     let lo = c.bin.saturating_sub(ring_hi)..c.bin.saturating_sub(ring_lo);
@@ -598,6 +656,8 @@ impl Dsp {
             label_at: 0,
             neighbor_busy: 0.0,
             cw: false,
+            duplicate: false,
+            key_hist: KeyHistory::default(),
             peak_snr: c.snr,
             label: String::new(),
             cq: false,
@@ -606,11 +666,14 @@ impl Dsp {
 
     fn publish(&mut self, now: f64) {
         self.last_publish = now;
+        for c in &mut self.channels {
+            c.cw = is_cw(c);
+        }
+        mark_duplicates(&mut self.channels);
         let mut views: Vec<DecoderView> = self
             .channels
             .iter_mut()
             .map(|c| {
-                c.cw = is_cw(c);
                 if c.emitted_seen != c.label_at {
                     c.label_at = c.emitted_seen;
                     match callsign::spot(&c.dec.text) {
@@ -637,7 +700,7 @@ impl Dsp {
                     neighbor_busy: c.neighbor_busy,
                     rhythm: c.dec.rhythm(),
                     junk: c.dec.junk_share().0,
-                    cw: c.cw,
+                    cw: c.cw && !c.duplicate,
                 }
             })
             .collect();
@@ -656,5 +719,70 @@ impl Dsp {
             s.new_rows.clear();
         }
         s.new_rows.append(&mut self.rows);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn channel(id: u64, offset: f64, keying: impl Fn(usize) -> bool) -> Channel {
+        let mut c = Channel {
+            id,
+            offset,
+            bin: 0,
+            dec: CwDecoder::new(250.0),
+            last_seen: 0.0,
+            last_char_t: 0.0,
+            emitted_seen: 0,
+            label_at: 0,
+            neighbor_busy: 0.0,
+            cw: true,
+            duplicate: false,
+            key_hist: KeyHistory::default(),
+            peak_snr: 0.0,
+            label: String::new(),
+            cq: false,
+        };
+        for i in 0..512 {
+            c.key_hist.set(i as u64, keying(i));
+        }
+        c
+    }
+
+    #[test]
+    fn hides_one_of_two_decoders_keying_together() {
+        let dits = |i: usize| (i / 15) % 2 == 0;
+        let mut chans = vec![channel(1, 1000.0, dits), channel(2, 1070.0, dits), channel(3, 2000.0, dits)];
+        mark_duplicates(&mut chans);
+        // 1 and 2 are the same signal; 3 is too far away to be one of them.
+        assert_eq!(chans.iter().filter(|c| c.duplicate).count(), 1);
+        assert!(!chans[2].duplicate);
+    }
+
+    #[test]
+    fn aligns_histories_of_decoders_created_at_different_times() {
+        let dits = |i: usize| (i / 15) % 2 == 0;
+        let mut early = channel(1, 1000.0, |_| false);
+        let mut late = channel(2, 1060.0, |_| false);
+        for f in 0..900u64 {
+            early.key_hist.set(f, dits(f as usize));
+            if f >= 300 {
+                late.key_hist.set(f, dits(f as usize));
+            }
+        }
+        let mut chans = vec![early, late];
+        mark_duplicates(&mut chans);
+        assert_eq!(chans.iter().filter(|c| c.duplicate).count(), 1);
+    }
+
+    #[test]
+    fn keeps_neighbours_keying_independently() {
+        let mut chans = vec![
+            channel(1, 1000.0, |i| (i / 15) % 2 == 0),
+            channel(2, 1100.0, |i| (i / 22) % 3 == 0),
+        ];
+        mark_duplicates(&mut chans);
+        assert!(chans.iter().all(|c| !c.duplicate));
     }
 }
