@@ -12,6 +12,19 @@ Multi-channel CW skimmer for FlexRadio DAX IQ streams. Written in Rust with an e
 cargo build --release
 ```
 
+### macOS app
+
+```bash
+./scripts/macos-app.sh                      # builds target/release/IQ Skimmer.app
+open "target/release/IQ Skimmer.app"
+cp -R "target/release/IQ Skimmer.app" /Applications/
+```
+
+Use the app on macOS. On first launch, macOS asks to let IQ Skimmer find devices on your local network: click **Allow**.
+Without that permission, connecting to the radio fails with "No route to host". A bare binary run from a terminal can be blocked silently.
+The app remembers the source settings. If it was connected to the radio when you quit, it reconnects on the next launch.
+The app is ad-hoc signed, so macOS may ask again after a rebuild.
+
 ## Run
 
 ```bash

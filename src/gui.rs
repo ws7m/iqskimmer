@@ -15,11 +15,60 @@ const HISTORY_COLS: usize = 900;
 const SCALE_W: f32 = 62.0;
 const LINE_H: f32 = 15.0;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum SrcKind {
     Flex,
     Wav,
     Synth,
+}
+
+const STORAGE_KEY: &str = "iqskimmer";
+
+/// Settings remembered between launches (an app started from the Dock has no command line).
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct Saved {
+    kind: SrcKind,
+    flex_addr: String,
+    flex_channel: u8,
+    flex_rate: u32,
+    wav_path: String,
+    wav_center_khz: f64,
+    synth_rate: u32,
+    synth_center_khz: f64,
+    synth_stations: usize,
+    synth_snr: f32,
+    threshold_db: f32,
+    swap_iq: bool,
+    max_decoders: usize,
+    floor_db: f32,
+    range_db: f32,
+    /// A radio source was running at exit: reconnect on launch.
+    was_running: bool,
+}
+
+impl Default for Saved {
+    fn default() -> Self {
+        let s = Settings::default();
+        Self {
+            kind: SrcKind::Synth,
+            flex_addr: String::new(),
+            flex_channel: 1,
+            flex_rate: 0,
+            wav_path: String::new(),
+            wav_center_khz: 7025.0,
+            synth_rate: 48_000,
+            synth_center_khz: 7025.0,
+            synth_stations: 20,
+            synth_snr: 6.0,
+            threshold_db: s.threshold_db,
+            swap_iq: s.swap_iq,
+            max_decoders: s.max_decoders,
+            floor_db: 2.0,
+            range_db: 30.0,
+            was_running: false,
+        }
+    }
 }
 
 pub struct App {
@@ -85,6 +134,28 @@ impl App {
             floor_db: 2.0,
             range_db: 30.0,
         };
+        // Command-line sources win; otherwise restore the last session.
+        let saved = if autostart.is_none() { cc.storage.and_then(|s| eframe::get_value::<Saved>(s, STORAGE_KEY)) } else { None };
+        if let Some(sv) = saved {
+            app.kind = sv.kind;
+            app.flex_addr = sv.flex_addr;
+            app.flex_channel = sv.flex_channel;
+            app.flex_rate = sv.flex_rate;
+            app.wav_path = sv.wav_path;
+            app.wav_center_khz = sv.wav_center_khz;
+            app.synth_rate = sv.synth_rate;
+            app.synth_center_khz = sv.synth_center_khz;
+            app.synth_stations = sv.synth_stations;
+            app.synth_snr = sv.synth_snr;
+            app.settings.threshold_db = sv.threshold_db;
+            app.settings.swap_iq = sv.swap_iq;
+            app.settings.max_decoders = sv.max_decoders;
+            app.floor_db = sv.floor_db;
+            app.range_db = sv.range_db;
+            if sv.was_running && app.kind == SrcKind::Flex {
+                app.error = app.source_config().and_then(|cfg| app.engine.start(cfg)).err();
+            }
+        }
         if let Some(cfg) = autostart {
             match &cfg {
                 SourceConfig::Flex { addr, daxiq_channel, rate } => {
@@ -233,6 +304,28 @@ impl App {
 }
 
 impl eframe::App for App {
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        let saved = Saved {
+            kind: self.kind,
+            flex_addr: self.flex_addr.clone(),
+            flex_channel: self.flex_channel,
+            flex_rate: self.flex_rate,
+            wav_path: self.wav_path.clone(),
+            wav_center_khz: self.wav_center_khz,
+            synth_rate: self.synth_rate,
+            synth_center_khz: self.synth_center_khz,
+            synth_stations: self.synth_stations,
+            synth_snr: self.synth_snr,
+            threshold_db: self.settings.threshold_db,
+            swap_iq: self.settings.swap_iq,
+            max_decoders: self.settings.max_decoders,
+            floor_db: self.floor_db,
+            range_db: self.range_db,
+            was_running: self.engine.is_running(),
+        };
+        eframe::set_value(storage, STORAGE_KEY, &saved);
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         ctx.request_repaint_after(Duration::from_millis(30));
         self.dev_screenshot(ctx);
