@@ -63,14 +63,6 @@ sudo apt-get install libxkbcommon-dev libgl1-mesa-dev libx11-dev libxcursor-dev 
 
 ### Automated builds (GitHub Actions)
 
-`.github/workflows/build.yml` tests and builds all three platforms on every push to `main` and on every pull request.
-- **Artifacts:** each run uploads three downloads: the macOS app (Apple Silicon), the Windows `.exe` and the Linux binary. They are on the run's page under **Actions**.
-- **Releases:** push a version tag to create a GitHub release with all three attached:
-
-```bash
-git tag v0.1.0 && git push origin v0.1.0
-```
-
 The downloads aren't signed with paid certificates, so each OS warns the first time:
 - **macOS:** right-click the app and choose **Open**, or run `xattr -dr com.apple.quarantine "IQ Skimmer.app"`.
 - **Windows:** SmartScreen shows "Windows protected your PC"; click **More info**, then **Run anyway**.
