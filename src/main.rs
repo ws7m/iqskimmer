@@ -116,7 +116,9 @@ fn main() -> Result<(), String> {
     }
 
     let options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default().with_inner_size([1280.0, 820.0]).with_title("IQ Skimmer"),
+        viewport: eframe::egui::ViewportBuilder::default()
+            .with_inner_size([1280.0, 820.0])
+            .with_title(concat!("IQ Skimmer v", env!("CARGO_PKG_VERSION"))),
         ..Default::default()
     };
     eframe::run_native("IQ Skimmer", options, Box::new(move |cc| Ok(Box::new(gui::App::new(cc, settings, cfg)))))
