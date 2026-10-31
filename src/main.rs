@@ -1,6 +1,7 @@
 // A GUI app on Windows: no console window when started from Explorer. See attach_console.
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+mod alerts;
 mod dsp;
 mod engine;
 mod gui;

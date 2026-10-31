@@ -1,6 +1,7 @@
 //! egui front end: vertical-frequency waterfall (time scrolls right-to-left, newest at the right),
 //! frequency scale, spot labels aligned to each signal's frequency, and the selected decoder's text.
 
+use crate::alerts::Alerts;
 use crate::engine::{DecoderView, Engine, HOLD_S, Settings, WF_DB_MIN, WF_DB_STEP, wf_db};
 use crate::source::{SliceState, SourceConfig};
 use crate::source::flex::{self, RadioInfo};
@@ -44,6 +45,8 @@ struct Saved {
     swap_iq: bool,
     max_decoders: usize,
     log_text: bool,
+    /// Comma-separated callsigns to raise alerts for.
+    alert_calls: String,
     floor_db: f32,
     range_db: f32,
     /// A radio source was running at exit: reconnect on launch.
@@ -68,6 +71,7 @@ impl Default for Saved {
             swap_iq: s.swap_iq,
             max_decoders: s.max_decoders,
             log_text: s.log_text,
+            alert_calls: String::new(),
             floor_db: 2.0,
             range_db: 30.0,
             was_running: false,
@@ -108,6 +112,11 @@ pub struct App {
     center: f64,
     /// Dragging the frequency scale to move the radio's panadapter.
     pan_drag: Option<PanDrag>,
+    alerts: Alerts,
+    /// The alert watch list as typed, and whether its window is open.
+    alert_calls: String,
+    show_alert_window: bool,
+    last_alert_scan: std::time::Instant,
     floor_db: f32,
     range_db: f32,
 }
@@ -143,6 +152,10 @@ impl App {
             slices: Vec::new(),
             center: 0.0,
             pan_drag: None,
+            alerts: Alerts::default(),
+            alert_calls: String::new(),
+            show_alert_window: false,
+            last_alert_scan: std::time::Instant::now(),
             floor_db: 2.0,
             range_db: 30.0,
         };
@@ -164,6 +177,8 @@ impl App {
             app.settings.swap_iq = sv.swap_iq;
             app.settings.max_decoders = sv.max_decoders;
             app.settings.log_text = sv.log_text;
+            app.alerts.set_watch_list(&sv.alert_calls);
+            app.alert_calls = sv.alert_calls;
             app.floor_db = sv.floor_db;
             app.range_db = sv.range_db;
             if sv.was_running && app.kind == SrcKind::Flex {
@@ -324,6 +339,12 @@ impl App {
                 let _ = std::fs::create_dir_all(&dir);
                 open_folder(&dir);
             }
+            ui.separator();
+            let watched = crate::alerts::parse_watch_list(&self.alert_calls).len();
+            let label = if watched > 0 { format!("Alerts ({watched})") } else { "Alerts…".to_string() };
+            if ui.selectable_label(self.show_alert_window, label).on_hover_text("Callsigns to watch for").clicked() {
+                self.show_alert_window = !self.show_alert_window;
+            }
             // Slice readouts: A and B on the top line, C and D below.
             if !self.slices.is_empty() {
                 ui.separator();
@@ -384,6 +405,7 @@ impl eframe::App for App {
             swap_iq: self.settings.swap_iq,
             max_decoders: self.settings.max_decoders,
             log_text: self.settings.log_text,
+            alert_calls: self.alert_calls.clone(),
             floor_db: self.floor_db,
             range_db: self.range_db,
             was_running: self.engine.is_running(),
@@ -462,6 +484,23 @@ impl eframe::App for App {
             }
         }
 
+        // Look for watched callsigns in the text of signals decoding right now.
+        let now = std::time::Instant::now();
+        if now.duration_since(self.last_alert_scan) >= Duration::from_millis(500) {
+            self.last_alert_scan = now;
+            self.alerts.expire(now);
+            let mut raised = 0;
+            for d in decoders.iter().filter(|d| d.idle_s < 3.0) {
+                raised += self.alerts.check(&d.text, center + d.offset_hz, now);
+            }
+            if raised > 0 {
+                // Bounces the Dock icon / flashes the taskbar if the window isn't in front.
+                ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+                    egui::UserAttentionType::Informational,
+                ));
+            }
+        }
+
         self.slices = slices;
         self.center = center;
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| self.toolbar(ui));
@@ -479,6 +518,15 @@ impl eframe::App for App {
                 ));
             });
         });
+
+        self.alert_window(ctx);
+        if self.alerts.watching() || !self.alerts.list.is_empty() {
+            egui::TopBottomPanel::bottom("alerts")
+                .resizable(true)
+                .default_height(96.0)
+                .min_height(40.0)
+                .show(ctx, |ui| self.alert_panel(ui, center));
+        }
 
         egui::TopBottomPanel::bottom("decode").min_height(44.0).show(ctx, |ui| {
             let sel = self.selected.and_then(|id| decoders.iter().find(|d| d.id == id));
@@ -690,6 +738,56 @@ impl App {
             let _ = write_bmp(&path, &img);
             std::process::exit(0);
         }
+    }
+
+    /// Window for editing the alert watch list.
+    fn alert_window(&mut self, ctx: &egui::Context) {
+        let mut open = self.show_alert_window;
+        egui::Window::new("Callsign alerts").open(&mut open).collapsible(false).show(ctx, |ui| {
+            ui.label("Callsigns to watch for, separated by commas:");
+            let edit = egui::TextEdit::multiline(&mut self.alert_calls)
+                .desired_rows(3)
+                .desired_width(340.0)
+                .hint_text("W1AW, K1ABC, VE3XYZ");
+            if ui.add(edit).changed() {
+                self.alerts.set_watch_list(&self.alert_calls);
+            }
+            ui.weak("When one is decoded, it's listed under the decoded text. Alerts clear after 5 minutes.");
+        });
+        self.show_alert_window = open;
+    }
+
+    /// The list of alerts, newest first. Double-click one to move slice A there.
+    fn alert_panel(&mut self, ui: &mut egui::Ui, center: f64) {
+        let pal = Palette::of(ui);
+        ui.horizontal(|ui| {
+            ui.strong("Alerts");
+            ui.weak("double-click one to move slice A there");
+            if !self.alerts.list.is_empty() && ui.small_button("Clear").clicked() {
+                self.alerts.list.clear();
+            }
+        });
+        egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+            if self.alerts.list.is_empty() {
+                ui.weak("No alerts yet");
+            }
+            let font = FontId::monospace(13.0);
+            let mut tune = None;
+            for a in &self.alerts.list {
+                let mut job = egui::text::LayoutJob::default();
+                let plain = egui::TextFormat::simple(font.clone(), pal.text);
+                job.append(&format!("{}  ", a.when.format("%Y-%m-%d %H:%M:%S")), 0.0, plain.clone());
+                job.append(&format!("{:<10}", a.call), 0.0, egui::TextFormat::simple(font.clone(), pal.call));
+                job.append(&format!(" {:>10.2} kHz  {}", a.hz / 1e3, a.mode), 0.0, plain);
+                let row = ui.add(egui::Label::new(job).sense(Sense::click()));
+                if row.on_hover_text("Double-click to move slice A here").double_clicked() {
+                    tune = Some(a.hz);
+                }
+            }
+            if let Some(hz) = tune {
+                self.tune_request = Some(('A', hz - center));
+            }
+        });
     }
 
     /// Right-click menu for a signal: one entry per open radio slice.

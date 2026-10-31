@@ -80,6 +80,13 @@ Click **Save text** in the toolbar, or start with `--save-text`. Each CW signal 
 A file starts with everything decoded so far. After a pause of 10 s or more, the next text starts a new line stamped with the time.
 **Open folder** shows the folder. The setting is remembered between launches.
 
+## Callsign alerts
+
+Click **Alerts…** in the toolbar and enter the callsigns to watch for, separated by commas. The list is remembered between launches.
+When one is decoded, it is listed in the **Alerts** panel below the decoded text with date, time, callsign, frequency and mode.
+`W1AW` also matches `W1AW/P`. The same call on the same frequency (within 200 Hz) is listed only once. Alerts are removed after 5 minutes.
+Double-click an alert to move slice A there in CW.
+
 ## How it works
 
 | Stage | Where |
