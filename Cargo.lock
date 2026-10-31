@@ -1805,7 +1805,7 @@ dependencies = [
 
 [[package]]
 name = "iqskimmer"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "chrono",
  "clap",
