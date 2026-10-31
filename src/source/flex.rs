@@ -39,6 +39,13 @@ struct Slice {
     pan: String,
 }
 
+/// Panadapter feeding our DAX IQ stream: as the stream reports it, or until then the first one
+/// set to our DAX IQ channel. With several GUI clients (stations) each panadapter has its own
+/// slices lettered from A, so slices must be looked up on this panadapter only.
+fn stream_pan(our_pan: &Option<String>, pans: &HashMap<String, (Option<f64>, Option<u8>)>, channel: u8) -> Option<String> {
+    our_pan.clone().or_else(|| pans.iter().find(|(_, e)| e.1 == Some(channel)).map(|(id, _)| id.clone()))
+}
+
 /// Open slices on panadapter `pan` (all of them while it isn't known yet), sorted by letter.
 fn slices_on(slices: &HashMap<String, Slice>, pan: Option<&str>) -> Vec<SliceState> {
     let mut list: Vec<SliceState> = slices
@@ -209,12 +216,17 @@ fn control_loop(
     ctl.send("sub daxiq all");
     ctl.send("sub stream all");
     ctl.send("sub slice all");
+    ctl.send("sub client all");
     let mut create_seq = ctl.send(&format!("stream create type=dax_iq daxiq_channel={channel}"));
     let mut legacy_tried = false;
 
     // panadapter id -> (center MHz, daxiq channel)
     let mut pans: HashMap<String, (Option<f64>, Option<u8>)> = HashMap::new();
     let mut our_pan: Option<String> = None;
+    let mut announced_pan: Option<String> = None;
+    // panadapter id -> owning GUI client handle, and client handle -> station name
+    let mut pan_owner: HashMap<String, String> = HashMap::new();
+    let mut stations: HashMap<String, String> = HashMap::new();
     let mut last_center: Option<f64> = None;
     let ch = channel.to_string();
     let mut slices: HashMap<String, Slice> = HashMap::new();
@@ -229,10 +241,7 @@ fn control_loop(
         while let Ok(cmd) = cmd_rx.try_recv() {
             match cmd {
                 RadioCmd::SetCenter(hz) => {
-                    let pan = our_pan.clone().or_else(|| {
-                        pans.iter().find(|(_, e)| e.1 == Some(channel)).map(|(id, _)| id.clone())
-                    });
-                    match pan {
+                    match stream_pan(&our_pan, &pans, channel) {
                         Some(pan) => {
                             let seq = ctl.send(&format!("display pan set {pan} center={:.6}", hz / 1e6));
                             center_seq = Some((seq, pan, hz));
@@ -250,7 +259,9 @@ fn control_loop(
                 }
                 RadioCmd::TuneCw { slice, hz } => {
                     let letter = slice.to_string();
-                    match slices.iter().find(|(_, s)| s.in_use && s.letter == letter) {
+                    let pan = stream_pan(&our_pan, &pans, channel);
+                    let on_pan = |s: &Slice| pan.as_ref().is_none_or(|p| &s.pan == p);
+                    match slices.iter().find(|(_, s)| s.in_use && s.letter == letter && on_pan(s)) {
                         Some((id, sl)) => {
                             if sl.mode != "CW" {
                                 ctl.send(&format!("slice set {id} mode=CW"));
@@ -258,7 +269,7 @@ fn control_loop(
                             let seq = ctl.send(&format!("slice tune {id} {:.6}", hz / 1e6));
                             tune_seq = Some((seq, id.clone(), hz));
                         }
-                        None => status(format!("Slice {slice} isn't open on the radio")),
+                        None => status(format!("Slice {slice} isn't open on this panadapter")),
                     }
                 }
             }
@@ -363,12 +374,20 @@ fn control_loop(
                         sl.pan = p.to_string();
                     }
                 } else if words.len() >= 3 && words[0] == "display" && words[1] == "pan" {
+                    if let Some(h) = m.get("client_handle") {
+                        pan_owner.insert(words[2].to_string(), h.to_string());
+                    }
                     let e = pans.entry(words[2].to_string()).or_default();
                     if let Some(c) = m.get("center").and_then(|v| v.parse().ok()) {
                         e.0 = Some(c);
                     }
                     if let Some(d) = m.get("daxiq_channel").or(m.get("daxiq")).and_then(|v| v.parse().ok()) {
                         e.1 = Some(d);
+                    }
+                } else if words.len() >= 2 && words[0] == "client" {
+                    if let Some(st) = m.get("station") {
+                        // Spaces in station names are sent as 0x7F.
+                        stations.insert(words[1].to_string(), st.replace('\u{7f}', " "));
                     }
                 } else if words.len() >= 2
                     && ((words[0] == "daxiq" && words[1] == ch)
@@ -398,10 +417,26 @@ fn control_loop(
             }
             _ => {}
         }
+        // Say which station's panadapter feeds the stream, warning when several stations have
+        // this DAX IQ channel set (the radio picks one; its slices are the ones shown).
+        if let Some(p) = &our_pan {
+            if announced_pan.as_ref() != Some(p) {
+                if let Some(station) = pan_owner.get(p).and_then(|h| stations.get(h)) {
+                    announced_pan = Some(p.clone());
+                    let n = pans.values().filter(|e| e.1 == Some(channel)).count();
+                    status(if n > 1 {
+                        format!(
+                            "DAX IQ {channel} is set on {n} stations; using {station}'s panadapter. \
+                             Clear it on the others to use a different one."
+                        )
+                    } else {
+                        format!("DAX IQ {channel} from {station}'s panadapter")
+                    });
+                }
+            }
+        }
         // Report slices on the panadapter feeding our I/Q stream whenever they change.
-        let pan = our_pan.clone().or_else(|| {
-            pans.iter().find(|(_, e)| e.1 == Some(channel)).map(|(id, _)| id.clone())
-        });
+        let pan = stream_pan(&our_pan, &pans, channel);
         let list = slices_on(&slices, pan.as_deref());
         if list != last_slices {
             last_slices = list.clone();
@@ -478,5 +513,28 @@ fn data_loop(udp: UdpSocket, tx: Sender<SourceEvent>, stop: Arc<AtomicBool>, our
         {
             return;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn slice(letter: &str, mhz: f64, pan: &str) -> Slice {
+        Slice { letter: letter.into(), mhz: Some(mhz), mode: "CW".into(), in_use: true, pan: pan.into() }
+    }
+
+    #[test]
+    fn two_stations_each_with_slice_a() {
+        // Two GUI clients, both with DAX IQ 1 set; the stream was given the second panadapter.
+        let slices: HashMap<String, Slice> =
+            [("0".into(), slice("A", 14.023485, "0x40000000")), ("1".into(), slice("A", 14.04799, "0x40000001"))].into();
+        let pans: HashMap<String, (Option<f64>, Option<u8>)> =
+            [("0x40000000".into(), (Some(14.0262), Some(1))), ("0x40000001".into(), (Some(14.0364), Some(1)))].into();
+        let pan = stream_pan(&Some("0x40000001".into()), &pans, 1);
+        assert_eq!(pan.as_deref(), Some("0x40000001"));
+        let list = slices_on(&slices, pan.as_deref());
+        assert_eq!(list.len(), 1);
+        assert!((list[0].hz - 14_047_990.0).abs() < 1.0);
     }
 }
