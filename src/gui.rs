@@ -108,7 +108,6 @@ pub struct App {
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, settings: Settings, autostart: Option<SourceConfig>) -> Self {
-        cc.egui_ctx.set_visuals(egui::Visuals::dark());
         let mut app = Self {
             started: std::time::Instant::now(),
             screenshot_requested: false,
@@ -323,7 +322,7 @@ impl App {
             }
         });
         if let Some(e) = &self.error {
-            ui.colored_label(Color32::from_rgb(255, 120, 100), e);
+            ui.colored_label(Palette::of(ui).error, e);
         }
     }
 }
@@ -449,7 +448,7 @@ impl eframe::App for App {
                             d.snr_db
                         ));
                     });
-                    ui.label(colored_text(tail_chars(&d.text, 160), FontId::monospace(15.0)));
+                    ui.label(colored_text(tail_chars(&d.text, 160), FontId::monospace(15.0), &Palette::of(ui)));
                 }
                 None => {
                     ui.weak("Click a signal or spot to follow its decoded text. Double-click a dot or spot to tune slice A in CW. Scroll to zoom, drag to pan, double-click empty waterfall for full span.");
@@ -465,6 +464,7 @@ impl eframe::App for App {
             }
             // Spot rows get a generous share of the width so they can show running text.
             let label_w = (full.width() * 0.36).clamp(240.0, 720.0);
+            let pal = Palette::of(ui);
             let wf_rect = Rect::from_min_max(full.min, pos2(full.max.x - SCALE_W - label_w, full.max.y));
             let scale_rect = Rect::from_min_max(pos2(wf_rect.max.x, full.min.y), pos2(wf_rect.max.x + SCALE_W, full.max.y));
             let label_rect = Rect::from_min_max(pos2(scale_rect.max.x, full.min.y), full.max);
@@ -494,14 +494,14 @@ impl eframe::App for App {
             }
 
             // Frequency scale.
-            painter.rect_filled(scale_rect, 0.0, Color32::from_rgb(20, 24, 30));
+            painter.rect_filled(scale_rect, 0.0, pal.scale_bg);
             let step = nice_step((hi - lo) / (scale_rect.height() as f64 / 50.0));
             let mut f = ((center + lo) / step).ceil() * step;
             while f <= center + hi {
                 let y = f_to_y(f - center);
-                painter.line_segment([pos2(scale_rect.left(), y), pos2(scale_rect.left() + 6.0, y)], Stroke::new(1.0_f32, Color32::LIGHT_GRAY));
+                painter.line_segment([pos2(scale_rect.left(), y), pos2(scale_rect.left() + 6.0, y)], Stroke::new(1.0_f32, pal.scale_fg));
                 let txt = if step >= 1000.0 { format!("{:.0}", f / 1e3) } else if step >= 100.0 { format!("{:.1}", f / 1e3) } else { format!("{:.2}", f / 1e3) };
-                painter.text(pos2(scale_rect.left() + 8.0, y), Align2::LEFT_CENTER, txt, FontId::monospace(11.0), Color32::LIGHT_GRAY);
+                painter.text(pos2(scale_rect.left() + 8.0, y), Align2::LEFT_CENTER, txt, FontId::monospace(11.0), pal.scale_fg);
                 f += step;
             }
 
@@ -531,7 +531,7 @@ impl eframe::App for App {
             }
 
             // Spot labels.
-            painter.rect_filled(label_rect, 0.0, Color32::from_rgb(14, 18, 24));
+            painter.rect_filled(label_rect, 0.0, pal.list_bg);
             let mut items: Vec<(&DecoderView, f32)> = decoders
                 .iter()
                 .filter_map(|d| {
@@ -540,7 +540,7 @@ impl eframe::App for App {
                         return None;
                     }
                     // Mark every tracked signal at the waterfall's leading edge.
-                    let c = if d.key_down { Color32::from_rgb(120, 255, 140) } else { Color32::from_rgb(230, 210, 60) };
+                    let c = if d.key_down { pal.dot_keyed } else { pal.dot_idle };
                     painter.circle_filled(pos2(scale_rect.right() - 6.0, y), 3.0, c);
                     painter.line_segment([pos2(wf_rect.right() - 8.0, y), pos2(wf_rect.right(), y)], Stroke::new(2.0_f32, c));
                     // Listed until HOLD_S after the last decoded character.
@@ -585,28 +585,27 @@ impl eframe::App for App {
                         self.tune_request = Some((d.id, d.offset_hz));
                     }
                 }
-                painter.line_segment([pos2(scale_rect.right() - 4.0, *y), pos2(x0 - 4.0, *py)], Stroke::new(1.0_f32, Color32::from_gray(140)));
+                painter.line_segment([pos2(scale_rect.right() - 4.0, *y), pos2(x0 - 4.0, *py)], Stroke::new(1.0_f32, pal.leader));
                 if is_sel {
-                    painter.rect_filled(row, 2.0, Color32::from_rgb(30, 55, 120));
+                    painter.rect_filled(row, 2.0, pal.selected_bg);
                 } else if is_hover {
-                    painter.rect_filled(row, 2.0, Color32::from_gray(50));
+                    painter.rect_filled(row, 2.0, pal.hover_bg);
                 }
                 // CQ marker column, then as much of the running text as fits.
                 if d.cq {
                     painter.add(egui::Shape::convex_polygon(
                         vec![pos2(x0, py - 5.0), pos2(x0 + 8.0, *py), pos2(x0, py + 5.0)],
-                        Color32::from_rgb(60, 200, 60),
+                        pal.cq_marker,
                         Stroke::NONE,
                     ));
                 }
                 // Estimated speed, fixed width so the text columns line up: "(25) ", "( 8) ".
-                let wpm_color = Color32::from_rgb(150, 160, 175);
                 painter.text(
                     pos2(x0 + 12.0, *py),
                     Align2::LEFT_CENTER,
                     format!("({:>2.0})", d.wpm.min(99.0)),
                     font.clone(),
-                    wpm_color,
+                    pal.wpm,
                 );
                 let text_x = x0 + 12.0 + 5.0 * char_w;
                 let max_chars = ((row.right() - text_x - 4.0) / char_w).max(1.0) as usize;
@@ -616,7 +615,7 @@ impl eframe::App for App {
                 } else {
                     text.to_string()
                 };
-                let galley = painter.layout_job(colored_text(&shown, font.clone()));
+                let galley = painter.layout_job(colored_text(&shown, font.clone(), &pal));
                 painter.galley(pos2(text_x, py - galley.size().y / 2.0), galley, Color32::WHITE);
             }
         });
@@ -746,14 +745,73 @@ fn tail_chars(s: &str, n: usize) -> &str {
     }
 }
 
-const CALL_COLOR: Color32 = Color32::from_rgb(255, 95, 85);
-const KEYWORD_COLOR: Color32 = Color32::from_rgb(110, 150, 255);
-const TEXT_COLOR: Color32 = Color32::from_rgb(215, 220, 225);
+/// Colors drawn by hand (decoded text, spot list, frequency scale), picked for the current
+/// light or dark theme. The waterfall itself stays dark in both.
+struct Palette {
+    text: Color32,
+    call: Color32,
+    keyword: Color32,
+    wpm: Color32,
+    error: Color32,
+    list_bg: Color32,
+    scale_bg: Color32,
+    scale_fg: Color32,
+    leader: Color32,
+    selected_bg: Color32,
+    hover_bg: Color32,
+    dot_idle: Color32,
+    dot_keyed: Color32,
+    cq_marker: Color32,
+}
+
+impl Palette {
+    fn of(ui: &egui::Ui) -> Self {
+        if ui.visuals().dark_mode { Self::dark() } else { Self::light() }
+    }
+
+    fn dark() -> Self {
+        Self {
+            text: Color32::from_rgb(215, 220, 225),
+            call: Color32::from_rgb(255, 95, 85),
+            keyword: Color32::from_rgb(110, 150, 255),
+            wpm: Color32::from_rgb(150, 160, 175),
+            error: Color32::from_rgb(255, 120, 100),
+            list_bg: Color32::from_rgb(14, 18, 24),
+            scale_bg: Color32::from_rgb(20, 24, 30),
+            scale_fg: Color32::LIGHT_GRAY,
+            leader: Color32::from_gray(140),
+            selected_bg: Color32::from_rgb(30, 55, 120),
+            hover_bg: Color32::from_gray(50),
+            dot_idle: Color32::from_rgb(230, 210, 60),
+            dot_keyed: Color32::from_rgb(120, 255, 140),
+            cq_marker: Color32::from_rgb(60, 200, 60),
+        }
+    }
+
+    fn light() -> Self {
+        Self {
+            text: Color32::from_rgb(25, 28, 32),
+            call: Color32::from_rgb(195, 25, 25),
+            keyword: Color32::from_rgb(25, 75, 200),
+            wpm: Color32::from_rgb(95, 100, 110),
+            error: Color32::from_rgb(190, 30, 30),
+            list_bg: Color32::from_rgb(246, 247, 249),
+            scale_bg: Color32::from_rgb(230, 232, 236),
+            scale_fg: Color32::from_gray(60),
+            leader: Color32::from_gray(150),
+            selected_bg: Color32::from_rgb(190, 210, 250),
+            hover_bg: Color32::from_gray(222),
+            dot_idle: Color32::from_rgb(205, 150, 0),
+            dot_keyed: Color32::from_rgb(20, 165, 60),
+            cq_marker: Color32::from_rgb(20, 150, 40),
+        }
+    }
+}
 
 /// Decoded text with callsigns in red and common CW words in blue, like CW Skimmer.
 /// Words are runs of letters, digits and '/', so calls glued to punctuation or prosigns
 /// (`VE2GDI+`, `<BK>N3MK`) still highlight.
-fn colored_text(text: &str, font: FontId) -> egui::text::LayoutJob {
+fn colored_text(text: &str, font: FontId, pal: &Palette) -> egui::text::LayoutJob {
     let mut job = egui::text::LayoutJob::default();
     let fmt = |c: Color32| egui::TextFormat::simple(font.clone(), c);
     let is_word = |c: char| c.is_ascii_alphanumeric() || c == '/';
@@ -763,13 +821,13 @@ fn colored_text(text: &str, font: FontId) -> egui::text::LayoutJob {
         let end = rest.find(|ch: char| is_word(ch) != w).unwrap_or(rest.len());
         let (tok, tail) = rest.split_at(end);
         let color = if !w {
-            TEXT_COLOR
+            pal.text
         } else if crate::dsp::callsign::is_callsign(tok) {
-            CALL_COLOR
+            pal.call
         } else if matches!(tok, "CQ" | "TEST" | "TU" | "DE" | "QRZ" | "QRL" | "K" | "5NN" | "73") {
-            KEYWORD_COLOR
+            pal.keyword
         } else {
-            TEXT_COLOR
+            pal.text
         };
         job.append(tok, 0.0, fmt(color));
         rest = tail;
