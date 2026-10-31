@@ -22,8 +22,8 @@ pub const CONTROL_PORT: u16 = 4992;
 
 /// Requests from the GUI to the radio.
 pub enum RadioCmd {
-    /// Tune slice A (or the lowest-numbered slice if there is no A) to this frequency in Hz, mode CW.
-    TuneCw(f64),
+    /// Tune the slice with this letter (A-D) to a frequency in Hz, mode CW.
+    TuneCw { slice: char, hz: f64 },
     /// Change the DAX IQ sample rate (24000, 48000, 96000 or 192000).
     SetRate(u32),
 }
@@ -34,6 +34,21 @@ struct Slice {
     mhz: Option<f64>,
     mode: String,
     in_use: bool,
+    pan: String,
+}
+
+/// Open slices on panadapter `pan` (all of them while it isn't known yet), sorted by letter.
+fn slices_on(slices: &HashMap<String, Slice>, pan: Option<&str>) -> Vec<SliceState> {
+    let mut list: Vec<SliceState> = slices
+        .values()
+        .filter(|s| s.in_use && pan.is_none_or(|p| s.pan == p))
+        .filter_map(|s| {
+            let letter = s.letter.chars().next()?;
+            s.mhz.map(|f| SliceState { letter, hz: f * 1e6, mode: s.mode.clone() })
+        })
+        .collect();
+    list.sort_by_key(|s| s.letter);
+    list
 }
 pub const DISCOVERY_PORT: u16 = 4992;
 
@@ -201,7 +216,7 @@ fn control_loop(
     let mut last_center: Option<f64> = None;
     let ch = channel.to_string();
     let mut slices: HashMap<String, Slice> = HashMap::new();
-    let mut last_slice: Option<SliceState> = None;
+    let mut last_slices: Vec<SliceState> = Vec::new();
     // seq of the last `slice tune`, with the slice id and frequency
     let mut tune_seq: Option<(u32, String, f64)> = None;
 
@@ -217,12 +232,9 @@ fn control_loop(
                         ctl.send(&format!("stream set 0x{id:08X} daxiq_rate={r}"));
                     }
                 }
-                RadioCmd::TuneCw(hz) => {
-                    let target = slices
-                        .iter()
-                        .filter(|(_, s)| s.in_use)
-                        .min_by_key(|(id, s)| (s.letter != "A", id.parse::<u32>().unwrap_or(u32::MAX)));
-                    match target {
+                RadioCmd::TuneCw { slice, hz } => {
+                    let letter = slice.to_string();
+                    match slices.iter().find(|(_, s)| s.in_use && s.letter == letter) {
                         Some((id, sl)) => {
                             if sl.mode != "CW" {
                                 ctl.send(&format!("slice set {id} mode=CW"));
@@ -230,7 +242,7 @@ fn control_loop(
                             let seq = ctl.send(&format!("slice tune {id} {:.6}", hz / 1e6));
                             tune_seq = Some((seq, id.clone(), hz));
                         }
-                        None => status("No slice open on the radio to tune".into()),
+                        None => status(format!("Slice {slice} isn't open on the radio")),
                     }
                 }
             }
@@ -273,10 +285,6 @@ fn control_loop(
                                 sl.mhz = Some(hz / 1e6);
                                 sl.mode = "CW".into();
                                 status(format!("Slice {} tuned to {:.2} kHz CW", sl.letter, hz / 1e3));
-                                if sl.letter == "A" {
-                                    last_slice = Some(SliceState { hz: *hz, mode: "CW".into() });
-                                    let _ = tx.send(SourceEvent::SliceA(last_slice.clone()));
-                                }
                             }
                         } else {
                             status(format!("Tune failed: error 0x{code:08X} {msg}"));
@@ -319,13 +327,8 @@ fn control_loop(
                     if let Some(f) = m.get("RF_frequency").and_then(|v| v.parse().ok()) {
                         sl.mhz = Some(f);
                     }
-                    let a = slices
-                        .values()
-                        .find(|s| s.in_use && s.letter == "A")
-                        .and_then(|s| s.mhz.map(|f| SliceState { hz: f * 1e6, mode: s.mode.clone() }));
-                    if a != last_slice {
-                        last_slice = a.clone();
-                        let _ = tx.send(SourceEvent::SliceA(a));
+                    if let Some(p) = m.get("pan") {
+                        sl.pan = p.to_string();
                     }
                 } else if words.len() >= 3 && words[0] == "display" && words[1] == "pan" {
                     let e = pans.entry(words[2].to_string()).or_default();
@@ -362,6 +365,15 @@ fn control_loop(
                 }
             }
             _ => {}
+        }
+        // Report slices on the panadapter feeding our I/Q stream whenever they change.
+        let pan = our_pan.clone().or_else(|| {
+            pans.iter().find(|(_, e)| e.1 == Some(channel)).map(|(id, _)| id.clone())
+        });
+        let list = slices_on(&slices, pan.as_deref());
+        if list != last_slices {
+            last_slices = list.clone();
+            let _ = tx.send(SourceEvent::Slices(list));
         }
     }
     let id = our_stream.id.load(Ordering::Relaxed);

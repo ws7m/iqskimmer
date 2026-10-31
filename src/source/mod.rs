@@ -18,14 +18,15 @@ pub enum SourceEvent {
     /// Absolute frequency (Hz) of the I/Q stream's center.
     Center(f64),
     Status(String),
-    /// The radio's slice A, if one is open.
-    SliceA(Option<SliceState>),
+    /// The radio's open slices on the panadapter being skimmed, sorted by letter.
+    Slices(Vec<SliceState>),
     /// Sent by the engine itself when switching sources, to discard state from the old one.
     Reset,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SliceState {
+    pub letter: char,
     pub hz: f64,
     pub mode: String,
 }
@@ -44,9 +45,10 @@ pub struct SourceHandle {
 }
 
 impl SourceHandle {
-    /// Tune the radio's slice A to `hz` in CW. Returns false if this source has no radio control.
-    pub fn tune_cw(&self, hz: f64) -> bool {
-        self.radio.as_ref().is_some_and(|r| r.send(flex::RadioCmd::TuneCw(hz)).is_ok())
+    /// Tune the radio's slice `slice` (A-D) to `hz` in CW. Returns false if this source has no
+    /// radio control.
+    pub fn tune_cw(&self, slice: char, hz: f64) -> bool {
+        self.radio.as_ref().is_some_and(|r| r.send(flex::RadioCmd::TuneCw { slice, hz }).is_ok())
     }
 
     /// Change the radio's I/Q sample rate. Returns false if this source has no radio control.

@@ -99,9 +99,13 @@ pub struct App {
     view_rate: u32,
     selected: Option<u64>,
     hovered: Option<u64>,
-    /// Offset (Hz from center) of a signal the user double-clicked, to tune the radio to.
-    tune_request: Option<(u64, f64)>,
-    slice_a: Option<SliceState>,
+    /// Signal (decoder id, offset Hz) whose right-click menu is open.
+    menu_target: Option<(u64, f64)>,
+    /// Slice letter and offset (Hz from center) chosen in that menu, to tune the radio to.
+    tune_request: Option<(char, f64)>,
+    /// The radio's open slices on this panadapter, and the stream center, as of this frame.
+    slices: Vec<SliceState>,
+    center: f64,
     floor_db: f32,
     range_db: f32,
 }
@@ -132,8 +136,10 @@ impl App {
             view_rate: 0,
             selected: None,
             hovered: None,
+            menu_target: None,
             tune_request: None,
-            slice_a: None,
+            slices: Vec::new(),
+            center: 0.0,
             floor_db: 2.0,
             range_db: 30.0,
         };
@@ -315,10 +321,41 @@ impl App {
                 let _ = std::fs::create_dir_all(&dir);
                 open_folder(&dir);
             }
-            if let Some(a) = &self.slice_a {
+            // Slice readouts: A and B on the top line, C and D below.
+            if !self.slices.is_empty() {
                 ui.separator();
-                ui.label(egui::RichText::new("A").strong().color(Color32::WHITE).background_color(Color32::from_rgb(255, 70, 70)));
-                ui.label(egui::RichText::new(format!("{:.3} kHz  {}", a.hz / 1e3, a.mode)).monospace().size(14.0).strong());
+                ui.label("kHz").on_hover_text("Radio slices on this panadapter (frequency in kHz, mode)");
+                egui::Grid::new("slices").num_columns(2).spacing([14.0, 2.0]).show(ui, |ui| {
+                    for row in [['A', 'B'], ['C', 'D']] {
+                        if !row.iter().any(|l| self.slices.iter().any(|s| s.letter == *l)) {
+                            continue;
+                        }
+                        for letter in row {
+                            match self.slices.iter().find(|s| s.letter == letter) {
+                                Some(s) => {
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            egui::RichText::new(letter.to_string())
+                                                .strong()
+                                                .color(Color32::WHITE)
+                                                .background_color(SLICE_RED),
+                                        );
+                                        ui.label(
+                                            egui::RichText::new(format!("{:.3}  {}", s.hz / 1e3, s.mode))
+                                                .monospace()
+                                                .size(14.0)
+                                                .strong(),
+                                        );
+                                    });
+                                }
+                                None => {
+                                    ui.label("");
+                                }
+                            }
+                        }
+                        ui.end_row();
+                    }
+                });
             }
         });
         if let Some(e) = &self.error {
@@ -382,7 +419,7 @@ impl eframe::App for App {
         }
 
         // Snapshot shared state.
-        let (rate, center, bins, bin_hz, rows_per_s, decoders, status, load, new_rows, slice_a) = {
+        let (rate, center, bins, bin_hz, rows_per_s, decoders, status, load, new_rows, slices) = {
             let mut s = self.engine.shared.lock();
             (
                 s.rate,
@@ -394,7 +431,7 @@ impl eframe::App for App {
                 s.status.clone(),
                 s.load,
                 std::mem::take(&mut s.new_rows),
-                s.slice_a.clone(),
+                s.slices.clone(),
             )
         };
         // The engine turns logging off if it can't write; reflect that in the button.
@@ -412,14 +449,14 @@ impl eframe::App for App {
         }
         self.wf.push_rows(new_rows, bins);
 
-        if let Some((id, off)) = self.tune_request.take() {
-            self.selected = Some(id);
-            if !self.engine.tune_cw(center + off) {
+        if let Some((letter, off)) = self.tune_request.take() {
+            if !self.engine.tune_cw(letter, center + off) {
                 self.error = Some("Tuning needs a FlexRadio source".into());
             }
         }
 
-        self.slice_a = slice_a.clone();
+        self.slices = slices;
+        self.center = center;
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| self.toolbar(ui));
 
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
@@ -451,7 +488,7 @@ impl eframe::App for App {
                     ui.label(colored_text(tail_chars(&d.text, 160), FontId::monospace(15.0), &Palette::of(ui)));
                 }
                 None => {
-                    ui.weak("Click a signal or spot to follow its decoded text. Double-click a dot or spot to tune slice A in CW. Scroll to zoom, drag to pan, double-click empty waterfall for full span.");
+                    ui.weak("Click a signal or spot to follow its decoded text. Right-click one to set a radio slice there in CW. Scroll to zoom, drag to pan, double-click the waterfall for full span.");
                 }
             }
         });
@@ -505,15 +542,14 @@ impl eframe::App for App {
                 f += step;
             }
 
-            // Radio slice A marker.
-            if let Some(a) = &slice_a {
-                let y = f_to_y(a.hz - center);
+            // Radio slice markers: a line across the waterfall, tagged with the slice letter.
+            for sl in &self.slices {
+                let y = f_to_y(sl.hz - center);
                 if (wf_rect.top()..=wf_rect.bottom()).contains(&y) {
-                    let red = Color32::from_rgb(255, 70, 70);
-                    painter.line_segment([pos2(wf_rect.left(), y), pos2(scale_rect.left(), y)], Stroke::new(1.0_f32, red.gamma_multiply(0.7)));
+                    painter.line_segment([pos2(wf_rect.left(), y), pos2(scale_rect.left(), y)], Stroke::new(1.0_f32, SLICE_RED.gamma_multiply(0.7)));
                     let tag = Rect::from_min_size(pos2(scale_rect.left() + 1.0, y - 7.0), vec2(14.0, 14.0));
-                    painter.rect_filled(tag, 2.0, red);
-                    painter.text(tag.center(), Align2::CENTER_CENTER, "A", FontId::monospace(11.0), Color32::WHITE);
+                    painter.rect_filled(tag, 2.0, SLICE_RED);
+                    painter.text(tag.center(), Align2::CENTER_CENTER, sl.letter.to_string(), FontId::monospace(11.0), Color32::WHITE);
                 }
             }
 
@@ -569,6 +605,9 @@ impl eframe::App for App {
             let label_resp = ui.interact(label_rect, ui.id().with("labels"), Sense::click());
             let pointer = label_resp.hover_pos();
             self.hovered = None;
+            if label_resp.secondary_clicked() {
+                self.menu_target = None;
+            }
             let font = FontId::monospace(12.0);
             let char_w = ui.fonts(|f| f.glyph_width(&font, 'M'));
             for ((d, y), py) in items.iter().zip(&placed) {
@@ -581,8 +620,9 @@ impl eframe::App for App {
                     if label_resp.clicked() {
                         self.selected = Some(d.id);
                     }
-                    if label_resp.double_clicked() {
-                        self.tune_request = Some((d.id, d.offset_hz));
+                    if label_resp.secondary_clicked() {
+                        self.selected = Some(d.id);
+                        self.menu_target = Some((d.id, d.offset_hz));
                     }
                 }
                 painter.line_segment([pos2(scale_rect.right() - 4.0, *y), pos2(x0 - 4.0, *py)], Stroke::new(1.0_f32, pal.leader));
@@ -618,6 +658,9 @@ impl eframe::App for App {
                 let galley = painter.layout_job(colored_text(&shown, font.clone(), &pal));
                 painter.galley(pos2(text_x, py - galley.size().y / 2.0), galley, Color32::WHITE);
             }
+            if self.menu_target.is_some() {
+                label_resp.context_menu(|ui| self.slice_menu(ui));
+            }
         });
     }
 }
@@ -642,28 +685,52 @@ impl App {
         }
     }
 
+    /// Right-click menu for a signal: one entry per open radio slice.
+    fn slice_menu(&mut self, ui: &mut egui::Ui) {
+        let Some((_, off)) = self.menu_target else {
+            ui.close_menu();
+            return;
+        };
+        ui.label(egui::RichText::new(format!("{:.2} kHz", (self.center + off) / 1e3)).strong());
+        ui.separator();
+        if self.slices.is_empty() {
+            ui.weak("No radio slices on this panadapter");
+        }
+        let letters: Vec<char> = self.slices.iter().map(|s| s.letter).collect();
+        for letter in letters {
+            if ui.button(format!("Set Slice {letter} here")).clicked() {
+                self.tune_request = Some((letter, off));
+                ui.close_menu();
+            }
+        }
+    }
+
     fn handle_view_input(&mut self, ui: &mut egui::Ui, rect: Rect, rate: u32, decoders: &[DecoderView]) {
         let resp = ui.interact(rect, ui.id().with("wf"), Sense::click_and_drag());
         let (mut lo, mut hi) = self.view;
         let limit = rate as f64 / 2.0;
         let y_to_f = |y: f32, lo: f64, hi: f64| hi - ((y - rect.top()) / rect.height()) as f64 * (hi - lo);
         if resp.double_clicked() {
-            // On a signal's dot: tune the radio there. Anywhere else: back to full span.
-            let p = resp.interact_pointer_pos();
-            let dot_x = rect.right() - 6.0;
-            let hit = p.filter(|p| (p.x - dot_x).abs() < 10.0).and_then(|p| {
+            self.view_rate = 0;
+            return;
+        }
+        // Right-click on or near a signal (its trace or dot) opens the slice menu.
+        if resp.secondary_clicked() {
+            self.menu_target = resp.interact_pointer_pos().and_then(|p| {
+                let f = y_to_f(p.y, lo, hi);
+                let tol = ((hi - lo) / rect.height() as f64 * 10.0).max(60.0);
                 decoders
                     .iter()
-                    .map(|d| (d, (rect.top() + ((hi - d.offset_hz) / (hi - lo)) as f32 * rect.height() - p.y).abs()))
-                    .filter(|(_, dy)| *dy < 8.0)
-                    .min_by(|a, b| a.1.total_cmp(&b.1))
-                    .map(|(d, _)| d)
+                    .filter(|d| (d.offset_hz - f).abs() < tol)
+                    .min_by(|a, b| (a.offset_hz - f).abs().total_cmp(&(b.offset_hz - f).abs()))
+                    .map(|d| (d.id, d.offset_hz))
             });
-            match hit {
-                Some(d) => self.tune_request = Some((d.id, d.offset_hz)),
-                None => self.view_rate = 0,
+            if let Some((id, _)) = self.menu_target {
+                self.selected = Some(id);
             }
-            return;
+        }
+        if self.menu_target.is_some() {
+            resp.context_menu(|ui| self.slice_menu(ui));
         }
         if let Some(p) = resp.hover_pos() {
             let scroll = ui.input(|i| i.smooth_scroll_delta.y);
@@ -744,6 +811,9 @@ fn tail_chars(s: &str, n: usize) -> &str {
         None => s,
     }
 }
+
+/// Slice markers and readout tags (all slices look alike apart from their letter).
+const SLICE_RED: Color32 = Color32::from_rgb(255, 70, 70);
 
 /// Colors drawn by hand (decoded text, spot list, frequency scale), picked for the current
 /// light or dark theme. The waterfall itself stays dark in both.

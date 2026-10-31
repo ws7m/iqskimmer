@@ -141,6 +141,11 @@ fn headless(cfg: SourceConfig, settings: Settings, secs: f64) -> Result<(), Stri
             s.load * 100.0,
             s.status
         );
+        if !s.slices.is_empty() {
+            let list: Vec<String> =
+                s.slices.iter().map(|sl| format!("{} {:.3} kHz {}", sl.letter, sl.hz / 1e3, sl.mode)).collect();
+            println!("    slices: {}", list.join(", "));
+        }
         if std::env::var_os("IQDBG").is_some() {
             // Every decoder, including silent ones, for diagnosing detection.
             for d in &s.decoders {

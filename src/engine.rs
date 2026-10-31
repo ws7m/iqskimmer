@@ -172,8 +172,8 @@ pub struct Shared {
     /// DSP time / stream time.
     pub load: f32,
     pub stream_time_s: f64,
-    /// Radio slice A, when the source is a radio.
-    pub slice_a: Option<SliceState>,
+    /// The radio's open slices on the skimmed panadapter, when the source is a radio.
+    pub slices: Vec<SliceState>,
     /// Text logging hit an error and turned itself off.
     pub log_failed: bool,
 }
@@ -224,9 +224,9 @@ impl Engine {
         self.source.is_some()
     }
 
-    /// Tune the radio (if the source is one) to `hz` in CW.
-    pub fn tune_cw(&self, hz: f64) -> bool {
-        self.source.as_ref().is_some_and(|s| s.tune_cw(hz))
+    /// Tune slice `slice` (A-D) of the radio, if the source is one, to `hz` in CW.
+    pub fn tune_cw(&self, slice: char, hz: f64) -> bool {
+        self.source.as_ref().is_some_and(|s| s.tune_cw(slice, hz))
     }
 
     /// Change the radio's I/Q sample rate while running (radio sources only).
@@ -378,7 +378,7 @@ impl Dsp {
                 let mut s = self.shared.lock();
                 s.decoders.clear();
                 s.new_rows.clear();
-                s.slice_a = None;
+                s.slices.clear();
             }
             SourceEvent::Center(c) => {
                 if (c - self.center).abs() > 0.5 {
@@ -389,7 +389,7 @@ impl Dsp {
                 }
             }
             SourceEvent::Status(s) => self.shared.lock().status = s,
-            SourceEvent::SliceA(a) => self.shared.lock().slice_a = a,
+            SourceEvent::Slices(list) => self.shared.lock().slices = list,
             SourceEvent::Samples { rate, mut data } => {
                 if rate != self.rate {
                     self.configure(rate);
