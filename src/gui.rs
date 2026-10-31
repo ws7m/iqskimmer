@@ -44,6 +44,7 @@ struct Saved {
     threshold_db: f32,
     swap_iq: bool,
     max_decoders: usize,
+    decoder_spacing_hz: f64,
     log_text: bool,
     /// Comma-separated callsigns to raise alerts for.
     alert_calls: String,
@@ -70,6 +71,7 @@ impl Default for Saved {
             threshold_db: s.threshold_db,
             swap_iq: s.swap_iq,
             max_decoders: s.max_decoders,
+            decoder_spacing_hz: s.decoder_spacing_hz,
             log_text: s.log_text,
             alert_calls: String::new(),
             floor_db: 2.0,
@@ -186,6 +188,7 @@ impl App {
             app.settings.threshold_db = sv.threshold_db;
             app.settings.swap_iq = sv.swap_iq;
             app.settings.max_decoders = sv.max_decoders;
+            app.settings.decoder_spacing_hz = sv.decoder_spacing_hz;
             app.settings.log_text = sv.log_text;
             app.alerts.set_watch_list(&sv.alert_calls);
             app.alert_calls = sv.alert_calls;
@@ -330,10 +333,23 @@ impl App {
             }
         });
         ui.horizontal_wrapped(|ui| {
+            // Narrower than egui's default 100 points; the value box beside each gives precision.
+            ui.spacing_mut().slider_width = 60.0;
             ui.add(egui::Slider::new(&mut self.settings.threshold_db, 4.0..=30.0).text("detect dB"));
             ui.add(egui::Slider::new(&mut self.floor_db, -10.0..=20.0).text("floor"));
             ui.add(egui::Slider::new(&mut self.range_db, 10.0..=50.0).text("range"));
             ui.add(egui::DragValue::new(&mut self.settings.max_decoders).range(1..=2000).prefix("max decoders "));
+            ui.add(
+                egui::Slider::new(&mut self.settings.decoder_spacing_hz, 20.0..=200.0)
+                    .step_by(5.0)
+                    .suffix(" Hz")
+                    .text("spacing"),
+            )
+            .on_hover_text(
+                "Closest two decoders may be. Of two signals closer than this, only the stronger is \
+                 decoded. Lower it to separate stations calling close together; raise it if one \
+                 signal shows as two lines. Default 75 Hz.",
+            );
             ui.checkbox(&mut self.settings.swap_iq, "Swap I/Q");
             if ui.button("Full span").clicked() {
                 self.view_rate = 0;
@@ -414,6 +430,7 @@ impl eframe::App for App {
             threshold_db: self.settings.threshold_db,
             swap_iq: self.settings.swap_iq,
             max_decoders: self.settings.max_decoders,
+            decoder_spacing_hz: self.settings.decoder_spacing_hz,
             log_text: self.settings.log_text,
             alert_calls: self.alert_calls.clone(),
             floor_db: self.floor_db,

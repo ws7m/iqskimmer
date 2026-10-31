@@ -26,7 +26,10 @@ const MAX_PENDING_ROWS: usize = 2048;
 
 const ENVELOPE_RATE: u32 = 250;
 const NOISE_BLOCK: usize = 64;
-const MERGE_HZ: f64 = 45.0;
+/// Default closest spacing of two decoders: about one channelizer bandwidth (~80 Hz). Closer
+/// than this they hear the same signal (or the same pair of near zero-beat stations) and only
+/// add a second, worse line of text. Adjustable as `Settings::decoder_spacing_hz`.
+pub const DEFAULT_DECODER_SPACING_HZ: f64 = 75.0;
 const CAND_HITS: u32 = 4;
 const CHANNEL_TIMEOUT_S: f64 = 25.0;
 /// How long a shown decoder stays up through a pause, and stays listed after its last
@@ -90,9 +93,11 @@ impl KeyHistory {
 /// A strong signal can be detected twice a little apart in frequency. Both decoders then hear
 /// the same keying and print identical text, so hide the weaker of any two CW decoders that
 /// are within 300 Hz and key down together almost all the time.
+/// Two shown decoders closer than `spacing_hz` can't be told apart (they share most of their
+/// channel), so the weaker is hidden whatever its keying.
 /// Pairs that don't key during the 2 s history (a pause) can't be compared, so a duplicate
 /// stays hidden for `HOLD_S` after it was last seen copying its neighbour.
-fn mark_duplicates(channels: &mut [Channel], now: f64) {
+fn mark_duplicates(channels: &mut [Channel], now: f64, spacing_hz: f64) {
     let mut idx: Vec<usize> = (0..channels.len()).filter(|&i| channels[i].shown(now)).collect();
     idx.sort_by(|&a, &b| channels[a].offset.total_cmp(&channels[b].offset));
     for (n, &i) in idx.iter().enumerate() {
@@ -100,9 +105,21 @@ fn mark_duplicates(channels: &mut [Channel], now: f64) {
             if channels[j].offset - channels[i].offset > 300.0 {
                 break;
             }
+            let close = channels[j].offset - channels[i].offset < spacing_hz;
             let (both, either) = channels[i].key_hist.overlap(&channels[j].key_hist);
-            if either >= 50 && both as f32 > 0.8 * either as f32 {
-                let weaker = if channels[i].dec.snr_db() < channels[j].dec.snr_db() { i } else { j };
+            if close || (either >= 50 && both as f32 > 0.8 * either as f32) {
+                // Keep hiding the one already hidden, so the two don't trade places (or both
+                // end up hidden) as their signal-to-noise ratios wobble.
+                let hidden = |k: usize| now < channels[k].duplicate_until;
+                let weaker = if hidden(i) {
+                    i
+                } else if hidden(j) {
+                    j
+                } else if channels[i].dec.snr_db() < channels[j].dec.snr_db() {
+                    i
+                } else {
+                    j
+                };
                 channels[weaker].duplicate_until = now + HOLD_S;
             }
         }
@@ -129,11 +146,19 @@ pub struct Settings {
     pub max_decoders: usize,
     /// Save each shown decoder's text to Documents/IQSkimmer.
     pub log_text: bool,
+    /// Closest two decoders may be (Hz); the weaker of a closer pair is hidden.
+    pub decoder_spacing_hz: f64,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { threshold_db: 12.0, swap_iq: false, max_decoders: 500, log_text: false }
+        Self {
+            threshold_db: 12.0,
+            swap_iq: false,
+            max_decoders: 500,
+            log_text: false,
+            decoder_spacing_hz: DEFAULT_DECODER_SPACING_HZ,
+        }
     }
 }
 
@@ -666,12 +691,13 @@ impl Dsp {
     }
 
     fn on_peak(&mut self, off: f64, snr: f32, t: f64) {
-        if let Some(c) = self.channels.iter_mut().find(|c| (c.offset - off).abs() < MERGE_HZ) {
+        let spacing = self.settings.decoder_spacing_hz;
+        if let Some(c) = self.channels.iter_mut().find(|c| (c.offset - off).abs() < spacing) {
             c.last_seen = t;
             c.peak_snr = c.peak_snr.max(snr);
             return;
         }
-        let idx = match self.cands.iter().position(|c| (c.offset - off).abs() < MERGE_HZ / 2.0) {
+        let idx = match self.cands.iter().position(|c| (c.offset - off).abs() < spacing / 2.0) {
             Some(i) => i,
             None => {
                 self.cands.push(Candidate { offset: off, hits: 0, last_t: t, snr });
@@ -687,8 +713,12 @@ impl Dsp {
             return;
         }
         let c = self.cands.swap_remove(idx);
-        // Skip key clicks / sidebands of a much stronger neighbour.
-        if self.channels.iter().any(|ch| (ch.offset - c.offset).abs() < 200.0 && ch.peak_snr > c.snr + 25.0) {
+        // Skip key clicks / sidebands of a much stronger neighbour, and anything a decoder
+        // created while this candidate was collecting hits already covers.
+        if self.channels.iter().any(|ch| {
+            let d = (ch.offset - c.offset).abs();
+            d < spacing || (d < 200.0 && ch.peak_snr > c.snr + 25.0)
+        }) {
             return;
         }
         let bin = self.channel_bin(c.offset);
@@ -765,7 +795,7 @@ impl Dsp {
                 c.shown_until = now + HOLD_S;
             }
         }
-        mark_duplicates(&mut self.channels, now);
+        mark_duplicates(&mut self.channels, now, self.settings.decoder_spacing_hz);
         self.write_logs(now);
         let mut views: Vec<DecoderView> = self
             .channels
@@ -854,7 +884,7 @@ mod tests {
     fn hides_one_of_two_decoders_keying_together() {
         let dits = |i: usize| (i / 15) % 2 == 0;
         let mut chans = vec![channel(1, 1000.0, dits), channel(2, 1070.0, dits), channel(3, 2000.0, dits)];
-        mark_duplicates(&mut chans, 0.0);
+        mark_duplicates(&mut chans, 0.0, DEFAULT_DECODER_SPACING_HZ);
         // 1 and 2 are the same signal; 3 is too far away to be one of them.
         assert_eq!(chans.iter().filter(|c| !c.visible(0.0)).count(), 1);
         assert!(chans[2].visible(0.0));
@@ -872,8 +902,28 @@ mod tests {
             }
         }
         let mut chans = vec![early, late];
-        mark_duplicates(&mut chans, 0.0);
+        mark_duplicates(&mut chans, 0.0, DEFAULT_DECODER_SPACING_HZ);
         assert_eq!(chans.iter().filter(|c| !c.visible(0.0)).count(), 1);
+    }
+
+    #[test]
+    fn hides_one_of_two_decoders_closer_than_merge_distance() {
+        // Independent keying, but only 60 Hz apart: they can't be told apart.
+        let mut chans = vec![
+            channel(1, 1000.0, |i| (i / 15) % 2 == 0),
+            channel(2, 1060.0, |i| (i / 22) % 3 == 0),
+        ];
+        mark_duplicates(&mut chans, 0.0, DEFAULT_DECODER_SPACING_HZ);
+        assert_eq!(chans.iter().filter(|c| !c.visible(0.0)).count(), 1);
+    }
+
+    #[test]
+    fn keeps_hiding_the_same_one_of_a_pair() {
+        let mut chans = vec![channel(1, 1000.0, |_| false), channel(2, 1050.0, |_| false)];
+        chans[0].duplicate_until = 5.0; // decoder 1 was the one hidden last time
+        mark_duplicates(&mut chans, 1.0, DEFAULT_DECODER_SPACING_HZ);
+        assert!(!chans[0].visible(1.0));
+        assert!(chans[1].visible(1.0));
     }
 
     #[test]
@@ -882,7 +932,7 @@ mod tests {
             channel(1, 1000.0, |i| (i / 15) % 2 == 0),
             channel(2, 1100.0, |i| (i / 22) % 3 == 0),
         ];
-        mark_duplicates(&mut chans, 0.0);
+        mark_duplicates(&mut chans, 0.0, DEFAULT_DECODER_SPACING_HZ);
         assert!(chans.iter().all(|c| c.visible(0.0)));
     }
 }
