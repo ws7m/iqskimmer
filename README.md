@@ -4,8 +4,30 @@ Multi-channel CW skimmer for FlexRadio DAX IQ streams. Written in Rust with an e
 
 - Vertical waterfall (frequency up, time scrolling right to left, newest at the right edge)
 - Detects every CW signal in the I/Q span and runs a decoder on each one, in parallel (rayon)
+- Decoder text is displayed to the right of each signal as decoded.  In parenthesis is estimated CW WPM.
 - Spot labels (`CQ EA3AKY ▶`) sit next to each signal's frequency. Click one to follow its text.
 
+## GUI Controls
+
+- Top: Select I/Q source, Radio IP, Discover, DAX IQ Channel, rate, Start/stop
+- Next line: slider detect dB, slider for floor, slider for range, swap I/Q, Full span, Save text, Open folder, Alerts, Slice displays
+  - Detect dB is the detect threshold
+  - Floor sets the background color and signal floor of the waterfall
+  - Range sets the signal range on the waterfall
+  - Save text - Toggles on saving decoded text to small text files
+  - Alerts - Provides a window to enter comma separated alerts.  Example:  W1AW, QST, CQ, WS7M
+- Waterfall:
+  - Left click on a signal in the waterfall highlights that signal.  Decoded text is shown below in decoder line.
+  - Above decoded text in decoder line is frequency highlighted, estimated CW WPM and signal dB
+- Center area between waterfall and decoded text:
+  - Click and drag up/down to slide radio pan-adapter
+  - Mouse wheel expand/compress IQSkimmer view
+- Decoder dots in center area:
+  - Right click and select slice to move to this frequency
+- Alerts
+  - If alert text was entered, discovered text will be listed in the alerts area along with date/time
+  - Double click on an alert to move Slice A to the frequency.
+    
 ## Build
 
 ```bash
