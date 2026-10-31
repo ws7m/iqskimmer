@@ -32,9 +32,10 @@ const NOISE_BLOCK: usize = 64;
 pub const DEFAULT_DECODER_SPACING_HZ: f64 = 75.0;
 const CAND_HITS: u32 = 4;
 const CHANNEL_TIMEOUT_S: f64 = 25.0;
-/// How long a shown decoder stays up through a pause, and stays listed after its last
-/// character. Covers a station calling CQ and then listening.
-pub const HOLD_S: f64 = 10.0;
+/// Default for how long a shown decoder stays up through a pause, and stays listed after its
+/// last character. Covers a station calling CQ and then listening, or a QSO's overs.
+/// Adjustable as `Settings::hold_s`.
+pub const DEFAULT_HOLD_S: f64 = 30.0;
 /// Median rise of the per-block noise level that marks a waterfall row as impulse noise.
 /// Normal rows scatter well under 1 dB around zero.
 const IMPULSE_RISE_DB: f32 = 1.5;
@@ -96,8 +97,8 @@ impl KeyHistory {
 /// Two shown decoders closer than `spacing_hz` can't be told apart (they share most of their
 /// channel), so the weaker is hidden whatever its keying.
 /// Pairs that don't key during the 2 s history (a pause) can't be compared, so a duplicate
-/// stays hidden for `HOLD_S` after it was last seen copying its neighbour.
-fn mark_duplicates(channels: &mut [Channel], now: f64, spacing_hz: f64) {
+/// stays hidden for `hold_s` after it was last seen copying its neighbour.
+fn mark_duplicates(channels: &mut [Channel], now: f64, spacing_hz: f64, hold_s: f64) {
     let mut idx: Vec<usize> = (0..channels.len()).filter(|&i| channels[i].shown(now)).collect();
     idx.sort_by(|&a, &b| channels[a].offset.total_cmp(&channels[b].offset));
     for (n, &i) in idx.iter().enumerate() {
@@ -120,7 +121,7 @@ fn mark_duplicates(channels: &mut [Channel], now: f64, spacing_hz: f64) {
                 } else {
                     j
                 };
-                channels[weaker].duplicate_until = now + HOLD_S;
+                channels[weaker].duplicate_until = now + hold_s;
             }
         }
     }
@@ -148,6 +149,8 @@ pub struct Settings {
     pub log_text: bool,
     /// Closest two decoders may be (Hz); the weaker of a closer pair is hidden.
     pub decoder_spacing_hz: f64,
+    /// Seconds a decoder's line stays up after its last character.
+    pub hold_s: f64,
 }
 
 impl Default for Settings {
@@ -158,6 +161,7 @@ impl Default for Settings {
             max_decoders: 500,
             log_text: false,
             decoder_spacing_hz: DEFAULT_DECODER_SPACING_HZ,
+            hold_s: DEFAULT_HOLD_S,
         }
     }
 }
@@ -302,7 +306,7 @@ struct Channel {
 }
 
 impl Channel {
-    /// Counts as CW now or did within the last `HOLD_S`.
+    /// Counts as CW now or did within the last `Settings::hold_s`.
     fn shown(&self, now: f64) -> bool {
         self.cw || now < self.shown_until
     }
@@ -572,7 +576,9 @@ impl Dsp {
         });
 
         // Keep decoders that are still keying or recently detected.
-        self.channels.retain(|c| now - c.last_seen.max(c.last_char_t) < CHANNEL_TIMEOUT_S);
+        // Kept a little past the hold so a held line isn't dropped early.
+        let timeout = CHANNEL_TIMEOUT_S.max(self.settings.hold_s + 5.0);
+        self.channels.retain(|c| now - c.last_seen.max(c.last_char_t) < timeout);
 
         if now - self.last_publish >= 0.1 {
             self.publish(now);
@@ -792,10 +798,10 @@ impl Dsp {
         for c in &mut self.channels {
             c.cw = is_cw(c);
             if c.cw {
-                c.shown_until = now + HOLD_S;
+                c.shown_until = now + self.settings.hold_s;
             }
         }
-        mark_duplicates(&mut self.channels, now, self.settings.decoder_spacing_hz);
+        mark_duplicates(&mut self.channels, now, self.settings.decoder_spacing_hz, self.settings.hold_s);
         self.write_logs(now);
         let mut views: Vec<DecoderView> = self
             .channels
@@ -884,7 +890,7 @@ mod tests {
     fn hides_one_of_two_decoders_keying_together() {
         let dits = |i: usize| (i / 15) % 2 == 0;
         let mut chans = vec![channel(1, 1000.0, dits), channel(2, 1070.0, dits), channel(3, 2000.0, dits)];
-        mark_duplicates(&mut chans, 0.0, DEFAULT_DECODER_SPACING_HZ);
+        mark_duplicates(&mut chans, 0.0, DEFAULT_DECODER_SPACING_HZ, DEFAULT_HOLD_S);
         // 1 and 2 are the same signal; 3 is too far away to be one of them.
         assert_eq!(chans.iter().filter(|c| !c.visible(0.0)).count(), 1);
         assert!(chans[2].visible(0.0));
@@ -902,7 +908,7 @@ mod tests {
             }
         }
         let mut chans = vec![early, late];
-        mark_duplicates(&mut chans, 0.0, DEFAULT_DECODER_SPACING_HZ);
+        mark_duplicates(&mut chans, 0.0, DEFAULT_DECODER_SPACING_HZ, DEFAULT_HOLD_S);
         assert_eq!(chans.iter().filter(|c| !c.visible(0.0)).count(), 1);
     }
 
@@ -913,7 +919,7 @@ mod tests {
             channel(1, 1000.0, |i| (i / 15) % 2 == 0),
             channel(2, 1060.0, |i| (i / 22) % 3 == 0),
         ];
-        mark_duplicates(&mut chans, 0.0, DEFAULT_DECODER_SPACING_HZ);
+        mark_duplicates(&mut chans, 0.0, DEFAULT_DECODER_SPACING_HZ, DEFAULT_HOLD_S);
         assert_eq!(chans.iter().filter(|c| !c.visible(0.0)).count(), 1);
     }
 
@@ -921,7 +927,7 @@ mod tests {
     fn keeps_hiding_the_same_one_of_a_pair() {
         let mut chans = vec![channel(1, 1000.0, |_| false), channel(2, 1050.0, |_| false)];
         chans[0].duplicate_until = 5.0; // decoder 1 was the one hidden last time
-        mark_duplicates(&mut chans, 1.0, DEFAULT_DECODER_SPACING_HZ);
+        mark_duplicates(&mut chans, 1.0, DEFAULT_DECODER_SPACING_HZ, DEFAULT_HOLD_S);
         assert!(!chans[0].visible(1.0));
         assert!(chans[1].visible(1.0));
     }
@@ -932,7 +938,7 @@ mod tests {
             channel(1, 1000.0, |i| (i / 15) % 2 == 0),
             channel(2, 1100.0, |i| (i / 22) % 3 == 0),
         ];
-        mark_duplicates(&mut chans, 0.0, DEFAULT_DECODER_SPACING_HZ);
+        mark_duplicates(&mut chans, 0.0, DEFAULT_DECODER_SPACING_HZ, DEFAULT_HOLD_S);
         assert!(chans.iter().all(|c| c.visible(0.0)));
     }
 }

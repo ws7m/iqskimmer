@@ -2,7 +2,7 @@
 //! frequency scale, spot labels aligned to each signal's frequency, and the selected decoder's text.
 
 use crate::alerts::Alerts;
-use crate::engine::{DecoderView, Engine, HOLD_S, Settings, WF_DB_MIN, WF_DB_STEP, wf_db};
+use crate::engine::{DEFAULT_DECODER_SPACING_HZ, DEFAULT_HOLD_S, DecoderView, Engine, Settings, WF_DB_MIN, WF_DB_STEP, wf_db};
 use crate::source::{SliceState, SourceConfig};
 use crate::source::flex::{self, RadioInfo};
 use crossbeam_channel::Receiver;
@@ -45,6 +45,7 @@ struct Saved {
     swap_iq: bool,
     max_decoders: usize,
     decoder_spacing_hz: f64,
+    hold_s: f64,
     log_text: bool,
     /// Comma-separated callsigns to raise alerts for.
     alert_calls: String,
@@ -72,6 +73,7 @@ impl Default for Saved {
             swap_iq: s.swap_iq,
             max_decoders: s.max_decoders,
             decoder_spacing_hz: s.decoder_spacing_hz,
+            hold_s: s.hold_s,
             log_text: s.log_text,
             alert_calls: String::new(),
             floor_db: 2.0,
@@ -118,6 +120,7 @@ pub struct App {
     /// The alert watch list as typed, and whether its window is open.
     alert_calls: String,
     show_alert_window: bool,
+    show_prefs: bool,
     last_alert_scan: std::time::Instant,
     floor_db: f32,
     range_db: f32,
@@ -167,6 +170,7 @@ impl App {
             alerts: Alerts::default(),
             alert_calls: String::new(),
             show_alert_window: false,
+            show_prefs: false,
             last_alert_scan: std::time::Instant::now(),
             floor_db: 2.0,
             range_db: 30.0,
@@ -189,6 +193,7 @@ impl App {
             app.settings.swap_iq = sv.swap_iq;
             app.settings.max_decoders = sv.max_decoders;
             app.settings.decoder_spacing_hz = sv.decoder_spacing_hz;
+            app.settings.hold_s = sv.hold_s;
             app.settings.log_text = sv.log_text;
             app.alerts.set_watch_list(&sv.alert_calls);
             app.alert_calls = sv.alert_calls;
@@ -339,17 +344,6 @@ impl App {
             ui.add(egui::Slider::new(&mut self.floor_db, -10.0..=20.0).text("floor"));
             ui.add(egui::Slider::new(&mut self.range_db, 10.0..=50.0).text("range"));
             ui.add(egui::DragValue::new(&mut self.settings.max_decoders).range(1..=2000).prefix("max decoders "));
-            ui.add(
-                egui::Slider::new(&mut self.settings.decoder_spacing_hz, 20.0..=200.0)
-                    .step_by(5.0)
-                    .suffix(" Hz")
-                    .text("spacing"),
-            )
-            .on_hover_text(
-                "Closest two decoders may be. Of two signals closer than this, only the stronger is \
-                 decoded. Lower it to separate stations calling close together; raise it if one \
-                 signal shows as two lines. Default 75 Hz.",
-            );
             ui.checkbox(&mut self.settings.swap_iq, "Swap I/Q");
             if ui.button("Full span").clicked() {
                 self.view_rate = 0;
@@ -370,6 +364,9 @@ impl App {
             let label = if watched > 0 { format!("Alerts ({watched})") } else { "Alerts…".to_string() };
             if ui.selectable_label(self.show_alert_window, label).on_hover_text("Callsigns to watch for").clicked() {
                 self.show_alert_window = !self.show_alert_window;
+            }
+            if ui.selectable_label(self.show_prefs, "Preferences…").on_hover_text("Decoder settings (Cmd+, or Ctrl+,)").clicked() {
+                self.show_prefs = !self.show_prefs;
             }
             // Slice readouts: A and B on the top line, C and D below.
             if !self.slices.is_empty() {
@@ -431,6 +428,7 @@ impl eframe::App for App {
             swap_iq: self.settings.swap_iq,
             max_decoders: self.settings.max_decoders,
             decoder_spacing_hz: self.settings.decoder_spacing_hz,
+            hold_s: self.settings.hold_s,
             log_text: self.settings.log_text,
             alert_calls: self.alert_calls.clone(),
             floor_db: self.floor_db,
@@ -549,7 +547,11 @@ impl eframe::App for App {
             });
         });
 
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Comma)) {
+            self.show_prefs = !self.show_prefs;
+        }
         self.alert_window(ctx);
+        self.prefs_window(ctx);
         if self.alerts.watching() || !self.alerts.list.is_empty() {
             egui::TopBottomPanel::bottom("alerts")
                 .resizable(true)
@@ -664,8 +666,8 @@ impl eframe::App for App {
                     let c = if d.key_down { pal.dot_keyed } else { pal.dot_idle };
                     painter.circle_filled(pos2(scale_rect.right() - 6.0, y), 3.0, c);
                     painter.line_segment([pos2(wf_rect.right() - 8.0, y), pos2(wf_rect.right(), y)], Stroke::new(2.0_f32, c));
-                    // Listed until HOLD_S after the last decoded character.
-                    if d.text.trim().is_empty() || d.idle_s as f64 > HOLD_S {
+                    // Listed until the hold time after the last decoded character.
+                    if d.text.trim().is_empty() || d.idle_s as f64 > self.settings.hold_s {
                         return None;
                     }
                     Some((d, y))
@@ -789,6 +791,39 @@ impl App {
             );
         });
         self.show_alert_window = open;
+    }
+
+    /// Window for the less often changed decoder settings.
+    fn prefs_window(&mut self, ctx: &egui::Context) {
+        let mut open = self.show_prefs;
+        egui::Window::new("Preferences").open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
+            egui::Grid::new("prefs").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+                ui.label("Decoder spacing");
+                ui.add(egui::Slider::new(&mut self.settings.decoder_spacing_hz, 20.0..=200.0).step_by(5.0).suffix(" Hz"))
+                    .on_hover_text(
+                        "Closest two decoders may be. Of two signals closer than this, only the \
+                         stronger is decoded. Lower it to separate stations calling close together; \
+                         raise it if one signal shows as two lines.",
+                    );
+                ui.end_row();
+                ui.label("Hold text");
+                ui.add(egui::Slider::new(&mut self.settings.hold_s, 5.0..=120.0).step_by(5.0).suffix(" s"))
+                    .on_hover_text(
+                        "How long a decoder's line stays up after its last character, so text \
+                         isn't lost while a station pauses or listens.",
+                    );
+                ui.end_row();
+            });
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                if ui.button("Defaults").clicked() {
+                    self.settings.decoder_spacing_hz = DEFAULT_DECODER_SPACING_HZ;
+                    self.settings.hold_s = DEFAULT_HOLD_S;
+                }
+                ui.weak(format!("spacing {DEFAULT_DECODER_SPACING_HZ:.0} Hz, hold {DEFAULT_HOLD_S:.0} s"));
+            });
+        });
+        self.show_prefs = open;
     }
 
     /// The list of alerts, newest first. Double-click one to move slice A there.

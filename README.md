@@ -10,12 +10,15 @@ Multi-channel CW skimmer for FlexRadio DAX IQ streams. Written in Rust with an e
 ## GUI Controls
 
 - Top: Select I/Q source, Radio IP, Discover, DAX IQ Channel, rate, Start/stop
-- Next line: slider detect dB, slider for floor, slider for range, swap I/Q, Full span, Save text, Open folder, Alerts, Slice displays
+- Next line: slider detect dB, slider for floor, slider for range, swap I/Q, Full span, Save text, Open folder, Alerts, Preferences, Slice displays
   - Detect dB is the detect threshold
   - Floor sets the background color and signal floor of the waterfall
   - Range sets the signal range on the waterfall
   - Save text - Toggles on saving decoded text to small text files
   - Alerts - Provides a window to enter comma separated alerts.  Example:  W1AW, QST, CQ, WS7M
+  - Preferences (Cmd+, or Ctrl+,) - Decoder settings, remembered between launches:
+    - Decoder spacing - closest two decoders may be (default 75 Hz). Lower it to separate stations close together; raise it if one signal shows as two lines
+    - Hold text - how long a decoder's line stays up after its last character (default 30 s)
 - Waterfall:
   - Left click on a signal in the waterfall highlights that signal.  Decoded text is shown below in decoder line.
   - Above decoded text in decoder line is frequency highlighted, estimated CW WPM and signal dB
