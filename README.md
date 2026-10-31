@@ -58,7 +58,8 @@ On first connection, Windows Firewall asks whether to allow incoming network tra
 
 ### Linux
 
-Install Rust and the GUI development packages, then run `cargo build --release`. On Debian/Ubuntu:
+Ready-built downloads are on the Releases page for x64 (`iqskimmer-linux-x64.tar.gz`) and 64-bit ARM such as a Raspberry Pi 4/5 (`iqskimmer-linux-arm64.tar.gz`).
+To build it yourself, install Rust and the GUI development packages, then run `cargo build --release`. On Debian/Ubuntu:
 
 ```bash
 sudo apt-get install libxkbcommon-dev libgl1-mesa-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libwayland-dev

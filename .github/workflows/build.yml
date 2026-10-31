@@ -1,6 +1,6 @@
-# Builds IQ Skimmer for macOS, Windows and Linux on every push and pull request.
-# Each build is uploaded as a workflow artifact. Pushing a tag like v0.2.0 also creates a
-# GitHub release with all three attached.
+# Builds IQ Skimmer for macOS, Windows and Linux (x64 and ARM64) on every push and pull
+# request. Each build is uploaded as a workflow artifact. Pushing a tag like v0.2.0 also
+# creates a GitHub release with all of them attached.
 name: Build
 
 on:
@@ -25,6 +25,8 @@ jobs:
             artifact: iqskimmer-windows-x64.zip
           - os: ubuntu-latest
             artifact: iqskimmer-linux-x64.tar.gz
+          - os: ubuntu-24.04-arm # Raspberry Pi 4/5 and other 64-bit ARM Linux
+            artifact: iqskimmer-linux-arm64.tar.gz
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
