@@ -26,6 +26,8 @@ pub enum RadioCmd {
     TuneCw { slice: char, hz: f64 },
     /// Change the DAX IQ sample rate (24000, 48000, 96000 or 192000).
     SetRate(u32),
+    /// Move the center of the panadapter feeding our I/Q stream to this frequency in Hz.
+    SetCenter(f64),
 }
 
 #[derive(Default)]
@@ -219,11 +221,25 @@ fn control_loop(
     let mut last_slices: Vec<SliceState> = Vec::new();
     // seq of the last `slice tune`, with the slice id and frequency
     let mut tune_seq: Option<(u32, String, f64)> = None;
+    // seq of the last `display pan set ... center=`, with the panadapter and center in Hz
+    let mut center_seq: Option<(u32, String, f64)> = None;
 
     let mut line = Vec::new();
     while !stop.load(Ordering::Relaxed) {
         while let Ok(cmd) = cmd_rx.try_recv() {
             match cmd {
+                RadioCmd::SetCenter(hz) => {
+                    let pan = our_pan.clone().or_else(|| {
+                        pans.iter().find(|(_, e)| e.1 == Some(channel)).map(|(id, _)| id.clone())
+                    });
+                    match pan {
+                        Some(pan) => {
+                            let seq = ctl.send(&format!("display pan set {pan} center={:.6}", hz / 1e6));
+                            center_seq = Some((seq, pan, hz));
+                        }
+                        None => status("The panadapter for this DAX IQ channel isn't known yet".into()),
+                    }
+                }
                 RadioCmd::SetRate(r) => {
                     // Before the stream exists, the rate is applied when it is created.
                     want_rate = Some(r);
@@ -277,6 +293,22 @@ fn control_loop(
                 let seq: u32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
                 let code = u32::from_str_radix(parts.next().unwrap_or("1"), 16).unwrap_or(1);
                 let msg = parts.next().unwrap_or("");
+                if let Some((cseq, pan, hz)) = &center_seq {
+                    if seq == *cseq {
+                        if code == 0 {
+                            // As with slices, our own change isn't echoed back as status, but
+                            // the reply carries the center actually set (MHz), which the radio
+                            // may have rounded or limited.
+                            let mhz = msg.trim().parse::<f64>().unwrap_or(hz / 1e6);
+                            pans.entry(pan.clone()).or_default().0 = Some(mhz);
+                            last_center = Some(mhz);
+                            let _ = tx.send(SourceEvent::Center(mhz * 1e6));
+                        } else {
+                            status(format!("Panadapter move failed: error 0x{code:08X} {msg}"));
+                        }
+                        center_seq = None;
+                    }
+                }
                 if let Some((tseq, id, hz)) = &tune_seq {
                     if seq == *tseq {
                         if code == 0 {

@@ -229,6 +229,11 @@ impl Engine {
         self.source.as_ref().is_some_and(|s| s.tune_cw(slice, hz))
     }
 
+    /// Move the radio's panadapter center to `hz` (radio sources only).
+    pub fn set_radio_center(&self, hz: f64) -> bool {
+        self.source.as_ref().is_some_and(|s| s.set_center(hz))
+    }
+
     /// Change the radio's I/Q sample rate while running (radio sources only).
     pub fn set_radio_rate(&self, rate: u32) -> bool {
         self.source.as_ref().is_some_and(|s| s.set_rate(rate))
@@ -382,9 +387,24 @@ impl Dsp {
             }
             SourceEvent::Center(c) => {
                 if (c - self.center).abs() > 0.5 {
+                    // Signals keep their absolute frequency when the panadapter moves, so keep
+                    // their decoders, re-aimed at the new offset, unless they left the span.
+                    let shift = c - self.center;
+                    let keep = self.center != 0.0 && self.rate != 0;
                     self.center = c;
-                    self.channels.clear();
                     self.cands.clear();
+                    if keep {
+                        let edge = self.rate as f64 * 0.48;
+                        for ch in &mut self.channels {
+                            ch.offset -= shift;
+                        }
+                        self.channels.retain(|ch| ch.offset.abs() < edge);
+                        for i in 0..self.channels.len() {
+                            self.channels[i].bin = self.channel_bin(self.channels[i].offset);
+                        }
+                    } else {
+                        self.channels.clear();
+                    }
                     self.shared.lock().center_hz = c;
                 }
             }
@@ -449,6 +469,12 @@ impl Dsp {
         s.wf_bin_hz = self.wf_bin_hz;
         s.wf_rows_per_s = rate as f32 / self.wf_hop as f32;
         s.new_rows.clear();
+    }
+
+    /// Channelizer bin (fft-shifted) for a frequency offset from the center.
+    fn channel_bin(&self, offset: f64) -> usize {
+        let ch_fft = self.ch.as_ref().map_or(1, |s| s.fft_len()) as i64;
+        ((offset / self.ch_bin_hz).round() as i64 + ch_fft / 2).clamp(0, ch_fft - 1) as usize
     }
 
     fn rows_per_s(&self) -> f32 {
@@ -665,8 +691,7 @@ impl Dsp {
         if self.channels.iter().any(|ch| (ch.offset - c.offset).abs() < 200.0 && ch.peak_snr > c.snr + 25.0) {
             return;
         }
-        let ch_fft = self.ch.as_ref().map_or(1, |s| s.fft_len());
-        let bin = ((c.offset / self.ch_bin_hz).round() as i64 + ch_fft as i64 / 2).clamp(0, ch_fft as i64 - 1) as usize;
+        let bin = self.channel_bin(c.offset);
         let id = self.next_id;
         self.next_id += 1;
         self.channels.push(Channel {

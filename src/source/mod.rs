@@ -51,6 +51,12 @@ impl SourceHandle {
         self.radio.as_ref().is_some_and(|r| r.send(flex::RadioCmd::TuneCw { slice, hz }).is_ok())
     }
 
+    /// Move the radio's panadapter (and so the I/Q stream) to center on `hz`. Returns false if
+    /// this source has no radio control.
+    pub fn set_center(&self, hz: f64) -> bool {
+        self.radio.as_ref().is_some_and(|r| r.send(flex::RadioCmd::SetCenter(hz)).is_ok())
+    }
+
     /// Change the radio's I/Q sample rate. Returns false if this source has no radio control.
     pub fn set_rate(&self, rate: u32) -> bool {
         self.radio.as_ref().is_some_and(|r| r.send(flex::RadioCmd::SetRate(rate)).is_ok())

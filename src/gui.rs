@@ -1,7 +1,7 @@
 //! egui front end: vertical-frequency waterfall (time scrolls right-to-left, newest at the right),
 //! frequency scale, spot labels aligned to each signal's frequency, and the selected decoder's text.
 
-use crate::engine::{DecoderView, Engine, HOLD_S, Settings, wf_db};
+use crate::engine::{DecoderView, Engine, HOLD_S, Settings, WF_DB_MIN, WF_DB_STEP, wf_db};
 use crate::source::{SliceState, SourceConfig};
 use crate::source::flex::{self, RadioInfo};
 use crossbeam_channel::Receiver;
@@ -106,6 +106,8 @@ pub struct App {
     /// The radio's open slices on this panadapter, and the stream center, as of this frame.
     slices: Vec<SliceState>,
     center: f64,
+    /// Dragging the frequency scale to move the radio's panadapter.
+    pan_drag: Option<PanDrag>,
     floor_db: f32,
     range_db: f32,
 }
@@ -140,6 +142,7 @@ impl App {
             tune_request: None,
             slices: Vec::new(),
             center: 0.0,
+            pan_drag: None,
             floor_db: 2.0,
             range_db: 30.0,
         };
@@ -447,6 +450,10 @@ impl eframe::App for App {
             let half = rate as f64 * 0.48;
             self.view = (-half, half);
         }
+        // Keep the waterfall history in place on the band when the panadapter moves.
+        if self.center != 0.0 && center != self.center && bin_hz > 0.0 {
+            self.wf.shift_bins(((center - self.center) / bin_hz).round() as i64);
+        }
         self.wf.push_rows(new_rows, bins);
 
         if let Some((letter, off)) = self.tune_request.take() {
@@ -488,7 +495,7 @@ impl eframe::App for App {
                     ui.label(colored_text(tail_chars(&d.text, 160), FontId::monospace(15.0), &Palette::of(ui)));
                 }
                 None => {
-                    ui.weak("Click a signal or spot to follow its decoded text. Right-click one to set a radio slice there in CW. Scroll to zoom, drag to pan, double-click the waterfall for full span.");
+                    ui.weak("Click a signal or spot to follow its decoded text. Right-click one to set a radio slice there in CW. Drag the frequency scale to move the radio's panadapter. Scroll to zoom, drag the waterfall to pan, double-click it for full span.");
                 }
             }
         });
@@ -743,7 +750,31 @@ impl App {
                 lo = hi - span;
             }
         }
-        if resp.dragged() {
+        // Dragging the frequency scale moves the radio's panadapter; the scale follows the
+        // pointer like a grabbed map (drag down to go up in frequency).
+        let scale_left = rect.right() - SCALE_W;
+        if resp.hover_pos().is_some_and(|p| p.x >= scale_left) || self.pan_drag.is_some() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+        }
+        if resp.drag_started() && resp.interact_pointer_pos().is_some_and(|p| p.x >= scale_left) {
+            self.pan_drag = Some(PanDrag { start_center: self.center, dy: 0.0, sent_hz: self.center, sent_at: None });
+        }
+        if let Some(pd) = &mut self.pan_drag {
+            pd.dy += resp.drag_delta().y;
+            let target = (pd.start_center + pd.dy as f64 / rect.height() as f64 * (hi - lo)).round();
+            let released = !resp.dragged();
+            let due = released || pd.sent_at.is_none_or(|t| t.elapsed() >= PAN_DRAG_INTERVAL);
+            if due && (target - pd.sent_hz).abs() >= 1.0 {
+                pd.sent_hz = target;
+                pd.sent_at = Some(std::time::Instant::now());
+                if !self.engine.set_radio_center(target) {
+                    self.error = Some("Moving the panadapter needs a FlexRadio source".into());
+                }
+            }
+            if released {
+                self.pan_drag = None;
+            }
+        } else if resp.dragged() {
             let df = resp.drag_delta().y as f64 / rect.height() as f64 * (hi - lo);
             lo += df;
             hi += df;
@@ -810,6 +841,19 @@ fn tail_chars(s: &str, n: usize) -> &str {
         Some((i, _)) => &s[i..],
         None => s,
     }
+}
+
+/// How often a scale drag sends the radio a new panadapter center.
+const PAN_DRAG_INTERVAL: Duration = Duration::from_millis(100);
+
+struct PanDrag {
+    /// Panadapter center (Hz) when the drag started.
+    start_center: f64,
+    /// Pointer movement since then, in points.
+    dy: f32,
+    /// Last center sent to the radio, and when.
+    sent_hz: f64,
+    sent_at: Option<std::time::Instant>,
 }
 
 /// Slice markers and readout tags (all slices look alike apart from their letter).
@@ -931,6 +975,28 @@ impl Waterfall {
         }
     }
 
+    /// Move the history `shift` bins down the spectrum, for a panadapter center that moved up by
+    /// that much, so signals stay at their frequency. Uncovered bins read as noise floor.
+    fn shift_bins(&mut self, shift: i64) {
+        if shift == 0 {
+            return;
+        }
+        let floor = ((0.0 - WF_DB_MIN) / WF_DB_STEP) as u8;
+        for row in &mut self.rows {
+            let n = row.len() as i64;
+            if shift.abs() >= n {
+                row.fill(floor);
+            } else if shift > 0 {
+                row.copy_within(shift as usize.., 0);
+                row[(n - shift) as usize..].fill(floor);
+            } else {
+                row.copy_within(..(n + shift) as usize, (-shift) as usize);
+                row[..(-shift) as usize].fill(floor);
+            }
+        }
+        self.key = None;
+    }
+
     fn push_rows(&mut self, rows: Vec<Vec<u8>>, bins: usize) {
         if bins != self.bins {
             self.rows.clear();
@@ -1049,4 +1115,27 @@ fn write_bmp(path: &str, img: &ColorImage) -> std::io::Result<()> {
         b.extend_from_slice(&[p.b(), p.g(), p.r(), 255]);
     }
     std::fs::write(path, b)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shifting_keeps_signals_at_their_frequency() {
+        let mut wf = Waterfall::new();
+        // One row of 10 bins with a "signal" in bin 6.
+        let mut row = vec![0u8; 10];
+        row[6] = 200;
+        wf.push_rows(vec![row], 10);
+        // Center moved up by 2 bins: the signal now sits 2 bins lower.
+        wf.shift_bins(2);
+        assert_eq!(wf.rows[0].iter().position(|&v| v == 200), Some(4));
+        // And back down by 3: it moves 3 bins higher.
+        wf.shift_bins(-3);
+        assert_eq!(wf.rows[0].iter().position(|&v| v == 200), Some(7));
+        // Moving it off the end loses it.
+        wf.shift_bins(-5);
+        assert!(!wf.rows[0].contains(&200));
+    }
 }
