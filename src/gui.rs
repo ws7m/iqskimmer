@@ -123,6 +123,16 @@ pub struct App {
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, settings: Settings, autostart: Option<SourceConfig>) -> Self {
+        // egui draws weak text (hints) and disabled widgets (source fields while running) by
+        // blending halfway toward `noninteractive.weak_bg_fill`, which by default is nearly the
+        // background, so they were hard to read. Blend toward mid gray instead, and give normal
+        // text more contrast, in both themes.
+        for (theme, text, fade) in [(egui::Theme::Dark, 200, 120), (egui::Theme::Light, 40, 120)] {
+            cc.egui_ctx.style_mut_of(theme, |s| {
+                s.visuals.widgets.noninteractive.fg_stroke.color = Color32::from_gray(text);
+                s.visuals.widgets.noninteractive.weak_bg_fill = Color32::from_gray(fade);
+            });
+        }
         let mut app = Self {
             started: std::time::Instant::now(),
             screenshot_requested: false,
@@ -490,7 +500,10 @@ impl eframe::App for App {
             self.last_alert_scan = now;
             self.alerts.expire(now);
             let mut raised = 0;
-            for d in decoders.iter().filter(|d| d.idle_s < 3.0) {
+            // Not while the watch list is being edited: a half-typed call like "W" would match
+            // all over the band.
+            let scanning = !self.show_alert_window;
+            for d in decoders.iter().filter(|d| scanning && d.idle_s < 3.0) {
                 raised += self.alerts.check(&d.text, center + d.offset_hz, now);
             }
             if raised > 0 {
@@ -750,9 +763,13 @@ impl App {
                 .desired_width(340.0)
                 .hint_text("W1AW, K1ABC, VE3XYZ");
             if ui.add(edit).changed() {
+                self.alert_calls = self.alert_calls.to_ascii_uppercase();
                 self.alerts.set_watch_list(&self.alert_calls);
             }
-            ui.weak("When one is decoded, it's listed under the decoded text. Alerts clear after 5 minutes.");
+            ui.weak(
+                "When one is decoded, it's listed under the decoded text. Alerts clear after 5 \
+                 minutes. Matching pauses while this window is open.",
+            );
         });
         self.show_alert_window = open;
     }
@@ -779,7 +796,15 @@ impl App {
                 job.append(&format!("{}  ", a.when.format("%Y-%m-%d %H:%M:%S")), 0.0, plain.clone());
                 job.append(&format!("{:<10}", a.call), 0.0, egui::TextFormat::simple(font.clone(), pal.call));
                 job.append(&format!(" {:>10.2} kHz  {}", a.hz / 1e3, a.mode), 0.0, plain);
-                let row = ui.add(egui::Label::new(job).sense(Sense::click()));
+                // A full-width clickable row rather than a label, which would select text on
+                // double-click instead of reporting it.
+                let galley = ui.painter().layout_job(job);
+                let (rect, row) =
+                    ui.allocate_exact_size(vec2(ui.available_width(), galley.size().y + 2.0), Sense::click());
+                if row.hovered() {
+                    ui.painter().rect_filled(rect, 2.0, pal.hover_bg);
+                }
+                ui.painter().galley(pos2(rect.left() + 2.0, rect.top() + 1.0), galley, pal.text);
                 if row.on_hover_text("Double-click to move slice A here").double_clicked() {
                     tune = Some(a.hz);
                 }
