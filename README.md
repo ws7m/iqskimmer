@@ -115,3 +115,9 @@ Double-click an alert to move slice A there in CW.
 | Per-signal CW decoder: two-level tracker, hysteresis, adaptive WPM | `src/dsp/cw.rs` |
 | Callsign / CQ extraction for labels | `src/dsp/callsign.rs` |
 | GUI | `src/gui.rs` |
+
+## Stress test
+
+IQSkimmer during CW Sweepstakes on 40m:
+<img width="1467" height="1160" alt="image" src="https://github.com/user-attachments/assets/12e9fbe0-14bf-4445-802a-a0dc434c35b1" />
+
