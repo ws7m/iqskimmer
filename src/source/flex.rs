@@ -14,11 +14,18 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs, UdpSocket};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 pub const CONTROL_PORT: u16 = 4992;
+/// How often the UDP registration is resent from the data socket. Keeps a router or firewall
+/// between the radio and us forwarding the I/Q stream; harmless on a plain LAN.
+const UDP_REGISTER_EVERY: Duration = Duration::from_secs(5);
+/// No I/Q packets for this long: warn in the status bar.
+const STALL_WARN: Duration = Duration::from_secs(3);
+/// No I/Q packets for this long: remove the stream and create it again.
+const STALL_RECREATE: Duration = Duration::from_secs(10);
 
 /// Requests from the GUI to the radio.
 pub enum RadioCmd {
@@ -236,8 +243,57 @@ fn control_loop(
     // seq of the last `display pan set ... center=`, with the panadapter and center in Hz
     let mut center_seq: Option<(u32, String, f64)> = None;
 
+    // Our client handle (hex) from the radio's `H` line, for UDP registration.
+    let mut handle: Option<String> = None;
+    let mut last_register = Instant::now();
+    let register = |handle: &str| {
+        let msg = format!("client udp_register handle=0x{handle}");
+        let _ = udp.send_to(msg.as_bytes(), (radio_ip, 4993));
+    };
+    // Stall watch: packet count last seen, when it last changed, and whether we warned.
+    let mut seen_packets = 0u64;
+    let mut last_data = Instant::now();
+    let mut stalled = false;
+
     let mut line = Vec::new();
     while !stop.load(Ordering::Relaxed) {
+        if let Some(h) = &handle {
+            if last_register.elapsed() >= UDP_REGISTER_EVERY {
+                last_register = Instant::now();
+                register(h);
+            }
+        }
+        let packets = our_stream.packets.load(Ordering::Relaxed);
+        if packets != seen_packets {
+            seen_packets = packets;
+            last_data = Instant::now();
+            if stalled {
+                stalled = false;
+                status("I/Q data from the radio resumed".into());
+            }
+        }
+        let id = our_stream.id.load(Ordering::Relaxed);
+        if id != 0 {
+            let quiet = last_data.elapsed();
+            if quiet >= STALL_RECREATE {
+                // The radio may have dropped the stream, or a router stopped forwarding it.
+                status(format!("No I/Q data from the radio for {} s; restarting the stream", quiet.as_secs()));
+                ctl.send(&format!("stream remove 0x{id:08X}"));
+                our_stream.id.store(0, Ordering::Relaxed);
+                if let Some(h) = &handle {
+                    register(h);
+                }
+                create_seq = ctl.send(&format!("stream create type=dax_iq daxiq_channel={channel}"));
+                last_data = Instant::now();
+                stalled = true;
+            } else if quiet >= STALL_WARN && !stalled {
+                stalled = true;
+                status(format!("No I/Q data from the radio for {} s", quiet.as_secs()));
+                if let Some(h) = &handle {
+                    register(h);
+                }
+            }
+        }
         while let Ok(cmd) = cmd_rx.try_recv() {
             match cmd {
                 RadioCmd::SetCenter(hz) => {
@@ -296,8 +352,10 @@ fn control_loop(
         match kind {
             'H' => {
                 // Newer firmware also accepts UDP registration from the client's data socket.
-                let msg = format!("client udp_register handle=0x{body}");
-                let _ = udp.send_to(msg.as_bytes(), (radio_ip, 4993));
+                // It's repeated every few seconds (above) to keep any NAT mapping open.
+                register(body);
+                handle = Some(body.to_string());
+                last_register = Instant::now();
             }
             'R' => {
                 let mut parts = body.splitn(3, '|');
@@ -458,6 +516,8 @@ struct StreamInfo {
     /// Our DAX IQ stream ID, 0 until the radio answers `stream create`.
     id: AtomicU32,
     endian: AtomicU8,
+    /// Packets of our stream received so far, to notice when the stream stalls.
+    packets: AtomicU64,
 }
 
 /// Guess float byte order from a payload: the wrong order yields huge, tiny or non-finite values.
@@ -491,6 +551,7 @@ fn data_loop(udp: UdpSocket, tx: Sender<SourceEvent>, stop: Arc<AtomicBool>, our
         if ours != 0 && p.stream_id != Some(ours) {
             continue;
         }
+        our_stream.packets.fetch_add(1, Ordering::Relaxed);
         if p.oui.is_some_and(|o| o != vita::FLEX_OUI) && !warned {
             warned = true;
             let _ = tx.send(SourceEvent::Status(format!("Unexpected VITA OUI {:06X}", p.oui.unwrap())));
