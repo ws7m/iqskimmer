@@ -121,13 +121,16 @@ fn main() -> Result<(), String> {
         .with_title(concat!("IQ Skimmer v", env!("CARGO_PKG_VERSION")))
         // Wayland matches the window to iqskimmer.desktop by this id.
         .with_app_id("iqskimmer");
-    // Title bar and taskbar icon on Windows and Linux. On macOS the app bundle's icon is
-    // used (setting one here would replace it in the Dock).
+    // Title bar and taskbar icon on Windows and Linux.
     #[cfg(not(target_os = "macos"))]
     let viewport = match eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon-256.png")) {
         Ok(icon) => viewport.with_icon(icon),
         Err(_) => viewport,
     };
+    // On macOS the app bundle's icon belongs in the Dock. Without an icon here eframe would
+    // replace it with egui's logo while running; an empty one tells it to leave the Dock alone.
+    #[cfg(target_os = "macos")]
+    let viewport = viewport.with_icon(eframe::egui::IconData::default());
     let options = eframe::NativeOptions { viewport, ..Default::default() };
     eframe::run_native("IQ Skimmer", options, Box::new(move |cc| Ok(Box::new(gui::App::new(cc, settings, cfg)))))
         .map_err(|e| e.to_string())
