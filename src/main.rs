@@ -116,12 +116,19 @@ fn main() -> Result<(), String> {
         return headless(cfg.expect("source"), settings, secs);
     }
 
-    let options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default()
-            .with_inner_size([1280.0, 820.0])
-            .with_title(concat!("IQ Skimmer v", env!("CARGO_PKG_VERSION"))),
-        ..Default::default()
+    let viewport = eframe::egui::ViewportBuilder::default()
+        .with_inner_size([1280.0, 820.0])
+        .with_title(concat!("IQ Skimmer v", env!("CARGO_PKG_VERSION")))
+        // Wayland matches the window to iqskimmer.desktop by this id.
+        .with_app_id("iqskimmer");
+    // Title bar and taskbar icon on Windows and Linux. On macOS the app bundle's icon is
+    // used (setting one here would replace it in the Dock).
+    #[cfg(not(target_os = "macos"))]
+    let viewport = match eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon-256.png")) {
+        Ok(icon) => viewport.with_icon(icon),
+        Err(_) => viewport,
     };
+    let options = eframe::NativeOptions { viewport, ..Default::default() };
     eframe::run_native("IQ Skimmer", options, Box::new(move |cc| Ok(Box::new(gui::App::new(cc, settings, cfg)))))
         .map_err(|e| e.to_string())
 }

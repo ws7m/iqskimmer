@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=IQ Skimmer
+Comment=Multi-channel CW skimmer for FlexRadio DAX IQ
+Exec=iqskimmer
+Icon=iqskimmer
+Terminal=false
+Categories=HamRadio;AudioVideo;Network;
+StartupWMClass=iqskimmer

@@ -62,7 +62,9 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           cargo build --release
-          tar -czf "${{ matrix.artifact }}" -C target/release iqskimmer -C "$GITHUB_WORKSPACE" README.md
+          cp assets/icon-256.png target/release/iqskimmer.png
+          tar -czf "${{ matrix.artifact }}" -C target/release iqskimmer iqskimmer.png \
+            -C "$GITHUB_WORKSPACE/assets" iqskimmer.desktop -C "$GITHUB_WORKSPACE" README.md
 
       # archive: false uploads the file itself, not wrapped in another zip.
       - uses: actions/upload-artifact@v7

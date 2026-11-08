@@ -20,6 +20,10 @@ socket2 = { version = "0.5", features = ["all"] }
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_System_Console"] }
 
+# Embeds the program icon in iqskimmer.exe (build.rs); only used when building on Windows.
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
 [profile.release]
 opt-level = 3
 lto = "thin"

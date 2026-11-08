@@ -65,6 +65,14 @@ To build it yourself, install Rust and the GUI development packages, then run `c
 sudo apt-get install libxkbcommon-dev libgl1-mesa-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libwayland-dev
 ```
 
+To add IQ Skimmer to the desktop's application menu with its icon, from the unpacked download (or use `assets/` in a source checkout):
+
+```bash
+install -Dm755 iqskimmer ~/.local/bin/iqskimmer
+install -Dm644 iqskimmer.png ~/.local/share/icons/hicolor/256x256/apps/iqskimmer.png
+install -Dm644 iqskimmer.desktop ~/.local/share/applications/iqskimmer.desktop
+```
+
 ### Automated builds (GitHub Actions)
 
 The downloads aren't signed with paid certificates, so each OS warns the first time:
